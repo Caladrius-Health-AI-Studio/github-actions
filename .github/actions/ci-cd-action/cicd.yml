@@ -1,1 +1,76 @@
+name: CI Pipeline
 
+on:
+  push:
+    branches: ["dev"]
+  pull_request:
+    branches: ["dev"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------
+      # STEP 1: CHECKOUT (SHALLOW)
+      # -----------------------------
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # -----------------------------
+      # STEP 2: LOGIN TO GHCR
+      # -----------------------------
+      - name: Login to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+          docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      # -----------------------------
+      # STEP 3: BUILD BACKEND IMAGE
+      # -----------------------------
+      - name: Build Backend Docker Image
+        run: |
+          docker build \
+            -t ghcr.io/${{ github.repository_owner }}/gpracta-health-insurance-api:latest \
+            ./gpracta-health-insurance-api
+
+      # -----------------------------
+      # STEP 4: BUILD FRONTEND IMAGE (CRA)
+      # -----------------------------
+      - name: Build Frontend Docker Image
+        env:
+          CI: true
+        run: |
+          docker build \
+            -t ghcr.io/${{ github.repository_owner }}/gpracta-health-insurance-ui:latest \
+            ./gpracta-health-insurance-ui
+
+      # -----------------------------
+      # STEP 5: BUILD PYTHON OCR IMAGE (ROOT CONTEXT)
+      # -----------------------------
+      - name: Build OCR Service Docker Image
+        run: |
+          docker build \
+            -f Dockerfile.ocr \
+            -t ghcr.io/${{ github.repository_owner }}/enhanced-ocr-service:latest \
+            .
+
+
+      # -----------------------------
+      # STEP 5: PUSH IMAGES
+      # -----------------------------
+      - name: Push Docker Images
+        run: |
+          docker push ghcr.io/${{ github.repository_owner }}/gpracta-health-insurance-api:latest
+          docker push ghcr.io/${{ github.repository_owner }}/gpracta-health-insurance-ui:latest
+          docker push ghcr.io/${{ github.repository_owner }}/enhanced-ocr-service:latest
+
+      # -----------------------------
+      # STEP 6: DEPLOYMENT PLACEHOLDER
+      # -----------------------------
+      - name: Deployment Placeholder
+        run: echo "Deployment will be added later"
