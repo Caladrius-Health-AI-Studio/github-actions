@@ -1,4 +1,4 @@
-name: "TASS Backend Security Scan"
+name: "Backend Security Scan"
 description: "Runs ESLint Security and Semgrep with detailed Markdown Job Summaries."
 inputs:
   GITHUB_TOKEN:
@@ -49,7 +49,7 @@ runs:
     - name: 📊 Generate Job Summary
       shell: bash
       run: |
-        echo "### 🛡️ TASS Security Scan Report" >> $GITHUB_STEP_SUMMARY
+        echo "### 🛡️ Backend Security Scan Report" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
         # --- Semgrep Table Generation ---
