@@ -1,1 +1,89 @@
+name: "TASS Backend Security Scan"
+description: "Runs ESLint Security and Semgrep with detailed Markdown Job Summaries."
+inputs:
+  GITHUB_TOKEN:
+    description: 'GitHub token for API calls'
+    required: true
+    default: '${{ github.token }}'
+  working-directory:
+    description: 'Path to the backend source code'
+    required: false
+    default: './backend'
+  fail-build:
+    description: "Fail if vulnerabilities are found"
+    required: false
+    default: "true"
 
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Linting Tools
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        npm install eslint eslint-plugin-security --no-save
+        
+    - name: Run ESLint Security
+      id: eslint
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Generate a temporary markdown file for ESLint
+        echo "#### 🔍 ESLint Security Findings" > ../eslint-report.md
+        npx eslint . --plugin security --rule 'security/detect-object-injection: warn' --format markdown >> ../eslint-report.md || echo "No ESLint issues found." >> ../eslint-report.md
+
+    - name: Run Semgrep
+      id: semgrep
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        python3 -m pip install semgrep
+        # Output to JSON for parsing, SARIF for GitHub UI
+        semgrep scan --config p/nodejs --config p/owasp-top-10 --json --output ../semgrep-report.json || true
+
+    - name: 📊 Generate Job Summary
+      shell: bash
+      run: |
+        echo "### 🛡️ TASS Security Scan Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # --- Semgrep Table Generation ---
+        VULN_COUNT=$(jq '.results | length' semgrep-report.json)
+        
+        if [ "$VULN_COUNT" -gt 0 ]; then
+          echo "#### 🛑 Semgrep Vulnerabilities ($VULN_COUNT)" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Rule ID | File:Line | Message |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          
+          # Parse JSON to Markdown Table
+          jq -r '.results[] | "| \(.extra.severity) | \(.check_id) | \(.path):\(.start.line) | \(.extra.message | gsub("\n"; " ")) |"' semgrep-report.json >> $GITHUB_STEP_SUMMARY
+          echo "found_issues=true" >> $GITHUB_OUTPUT
+        else
+          echo "✅ **No Semgrep vulnerabilities detected.**" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "---" >> $GITHUB_STEP_SUMMARY
+        
+        # --- ESLint Integration ---
+        cat eslint-report.md >> $GITHUB_STEP_SUMMARY
+
+    - name: Create GitHub Issue
+      if: steps.semgrep.outputs.found_issues == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.GITHUB_TOKEN }}
+      run: |
+        gh issue create \
+          --title "🚨 Backend Security Findings: $(date +'%Y-%m-%d')" \
+          --body "Security issues detected in the latest backend scan. See [Workflow Summary](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details." \
+          --label "security-alert"
+
+    - name: Fail Build
+      if: steps.semgrep.outputs.found_issues == 'true' && inputs.fail-build == 'true'
+      shell: bash
+      run: exit 1
