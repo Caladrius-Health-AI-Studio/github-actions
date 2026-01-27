@@ -1,1 +1,116 @@
+name: 'Python AI & Security Scan'
+description: 'Scans Python code for vulnerabilities, audits dependencies, and checks AI models for pickle attacks.'
 
+inputs:
+  github_token:
+    description: 'GitHub token'
+    required: true
+    default: '${{ github.token }}'
+  working-directory:
+    description: 'Path to Python source code'
+    required: false
+    default: '.'
+  fail_on_detection:
+    description: 'Fail workflow if critical issues are found'
+    required: false
+    default: 'true'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install Security Tools
+      shell: bash
+      run: |
+        pip install bandit pip-audit picklescan jq
+
+    - name: 🐍 Run Bandit (Code SAST)
+      id: bandit
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # -r: recursive, -lll: High Severity only (reduce noise), -f: json
+        echo "Running Bandit..."
+        bandit -r . -lll -f json -o bandit-report.json || true
+
+    - name: 📦 Run Pip-Audit (Dependency SCA)
+      id: audit
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Scans current environment or requirements.txt
+        echo "Running Pip-Audit..."
+        if [ -f "requirements.txt" ]; then
+          pip-audit -r requirements.txt -f json -o audit-report.json || true
+        else
+          echo "No requirements.txt found, skipping audit." > audit-report.json
+          echo "[]" > audit-report.json # Empty JSON array to prevent jq errors
+        fi
+
+    - name: 🥒 Run Picklescan (AI Supply Chain)
+      id: picklescan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Scans for malicious pickle files (PyTorch/joblib models)
+        echo "Running Picklescan..."
+        picklescan -p . --output-format json > picklescan-report.json || true
+
+    - name: 📊 Generate Consolidated Report
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        echo "### 🐍 Python AI Security Report" >> $GITHUB_STEP_SUMMARY
+        FOUND_ISSUES=false
+
+        # --- 1. BANDIT REPORT ---
+        BANDIT_COUNT=$(jq '.results | length' bandit-report.json)
+        if [ "$BANDIT_COUNT" -gt 0 ] && [ "$BANDIT_COUNT" != "null" ]; then
+          echo "#### 🛡️ Bandit Code Issues ($BANDIT_COUNT)" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Issue | File:Line |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          jq -r '.results[] | "| \(.issue_severity) | \(.issue_text) | \(.filename):\(.line_number) |"' bandit-report.json >> $GITHUB_STEP_SUMMARY
+          FOUND_ISSUES=true
+        else
+          echo "✅ **Bandit:** Clean code patterns." >> $GITHUB_STEP_SUMMARY
+        fi
+
+        # --- 2. PIP-AUDIT REPORT ---
+        # Handling the audit structure (it can be an array of dependencies)
+        AUDIT_COUNT=$(jq '.dependencies | length' audit-report.json 2>/dev/null || echo "0")
+        if [ "$AUDIT_COUNT" -gt 0 ]; then
+             echo "#### 📦 Vulnerable Packages ($AUDIT_COUNT)" >> $GITHUB_STEP_SUMMARY
+             echo "| Package | Version | Vulnerability ID |" >> $GITHUB_STEP_SUMMARY
+             echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+             jq -r '.dependencies[] | .vulns[] | "| \(.alias) | \(.fix_versions[]) | \(.id) |"' audit-report.json >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+             # Note: pip-audit JSON structure can vary slightly based on version, graceful fallback added
+        else
+             echo "✅ **Pip-Audit:** No known CVEs in dependencies." >> $GITHUB_STEP_SUMMARY
+        fi
+
+        # --- 3. PICKLESCAN REPORT ---
+        PICKLE_COUNT=$(jq '. | length' picklescan-report.json 2>/dev/null || echo "0")
+        # Check if the scan found dangerous globals
+        SAFE_COUNT=$(jq '[.[] | select(.safety == "safe")] | length' picklescan-report.json 2>/dev/null)
+        DANGEROUS_COUNT=$(jq '[.[] | select(.safety == "dangerous")] | length' picklescan-report.json 2>/dev/null)
+        
+        if [[ "$DANGEROUS_COUNT" -gt 0 ]]; then
+           echo "#### 🥒 🛑 MALICIOUS MODEL DETECTED ($DANGEROUS_COUNT)" >> $GITHUB_STEP_SUMMARY
+           echo "| File | Status | Threat |" >> $GITHUB_STEP_SUMMARY
+           echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+           jq -r '.[] | select(.safety == "dangerous") | "| \(.path) | \(.safety) | \(.issues[]) |"' picklescan-report.json >> $GITHUB_STEP_SUMMARY
+           FOUND_ISSUES=true
+        else
+           echo "✅ **Picklescan:** $PICKLE_COUNT models scanned. All safe." >> $GITHUB_STEP_SUMMARY
+        fi
+
+        echo "issues_found=$FOUND_ISSUES" >> $GITHUB_OUTPUT
+
+    - name: Fail Workflow
+      if: steps.generate-report.outputs.issues_found == 'true' && inputs.fail_on_detection == 'true'
+      shell: bash
+      run: exit 1
