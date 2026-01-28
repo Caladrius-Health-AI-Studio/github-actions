@@ -114,3 +114,18 @@ runs:
       if: steps.generate-report.outputs.issues_found == 'true' && inputs.fail_on_detection == 'true'
       shell: bash
       run: exit 1
+
+    - name: 🚨 Report Python Security Vulnerabilities
+        # Run if issues_found is true
+      if: steps.generate-report.outputs.issues_found == 'true'
+      uses: your-org/github-actions/report-security-issue@main
+      with:
+        scan_name: "Python AI & Code Security"
+        severity: "CRITICAL"
+        finding_summary: "Vulnerabilities detected in Bandit SAST or Picklescan Model Audit."
+        # We concatenate the reports for the issue body
+        details_file_path: "bandit-report.json" 
+        remediation_steps: |
+          1. **Picklescan:** If a model is flagged 'Dangerous', convert it to `.safetensors` or rebuild it. **DO NOT DEPLOY.**
+          2. **Bandit:** Fix hardcoded passwords or insecure `exec()` calls.
+          3. **Dependencies:** Update `requirements.txt` to patch vulnerable packages.
