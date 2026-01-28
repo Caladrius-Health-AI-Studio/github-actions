@@ -43,9 +43,11 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        # ADDED p/react and p/javascript for full frontend coverage
-        echo '{"results": []}' > ../semgrep-report.json
-        semgrep scan --config p/nodejs --config p/react --config p/javascript --config p/owasp-top-10 --json --output ../semgrep-report.json || true
+        # FIX: Write to CURRENT directory, not parent (../)
+        echo '{"results": []}' > semgrep-report.json
+        
+        # FIX: Add || true to prevent crash if issues are found
+        semgrep scan --config p/nodejs --config p/react --config p/javascript --config p/owasp-top-10 --json --output semgrep-report.json || true
 
     - name: 📊 Generate Job Summary
       id: generate_summary
