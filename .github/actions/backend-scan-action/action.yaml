@@ -87,3 +87,18 @@ runs:
       if: steps.semgrep.outputs.found_issues == 'true' && inputs.fail-build == 'true'
       shell: bash
       run: exit 1
+
+    - name: 🚨 Report Web Security Vulnerabilities
+        # Run if Semgrep found issues
+      if: steps.semgrep.outputs.found_issues == 'true'
+      uses: Caladrius-Health-AI-Studio/github-actions/report-security-issue@main
+      with:
+        scan_name: "Web Security (React/Node)"
+        severity: "HIGH"
+        finding_summary: "Semantic vulnerabilities (XSS, Injection, or Insecure Storage) detected."
+        # We point to the Semgrep JSON report which lists the file paths
+        details_file_path: "semgrep-report.json"
+        remediation_steps: |
+          1. **XSS (React):** Avoid `dangerouslySetInnerHTML`. Use proper sanitization libraries like `dompurify`.
+          2. **Injection (Node):** Ensure all database queries use parameterized inputs (e.g., avoid string concatenation in SQL/Mongo).
+          3. **Secrets:** If hardcoded secrets were found, move them to `.env` immediately.
