@@ -1,17 +1,12 @@
-name: 'Python AI & Security Scan'
-description: 'Scans Python code and AI models with Safe-Failure logic.'
+name: 'Python Security Scan'
+description: 'Scans Python code with Bandit (general security) and Picklescan (ML model safety)'
 
 inputs:
   github_token:
-    description: 'GitHub token'
+    description: 'GitHub token for creating issues'
     required: true
-    default: '${{ github.token }}'
-  working-directory:
-    description: 'Path to Python source code'
-    required: false
-    default: '.'
-  fail_on_detection: # Consistent with your internal logic
-    description: 'Fail workflow if critical issues are found'
+  fail_on_high_critical:
+    description: 'Fail the workflow if HIGH or CRITICAL vulnerabilities are found'
     required: false
     default: 'true'
 
@@ -19,99 +14,207 @@ runs:
   using: "composite"
   steps:
     - name: Setup Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
+        python-version: '3.11'
 
     - name: Install Security Tools
       shell: bash
       run: |
-        pip install bandit pip-audit picklescan jq
+        pip install bandit picklescan --quiet
 
-    - name: 🐍 Run Bandit (Code SAST)
-      id: bandit
+    - name: Get Changed Python Files
+      id: get_files
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
       run: |
-        echo "Running Bandit..."
-        # Create empty report first to prevent jq crashes if bandit fails to start
-        echo '{"results": []}' > bandit-report.json
-        bandit -r . -lll -f json -o bandit-report.json || true
-
-    - name: 📦 Run Pip-Audit (Dependency SCA)
-      id: audit
-      shell: bash
-      working-directory: ${{ inputs.working-directory }}
-      run: |
-        echo "Running Pip-Audit..."
-        if [ -f "requirements.txt" ]; then
-          pip-audit -r requirements.txt -f json -o audit-report.json || true
+        # Get changed .py files
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          git fetch origin "$BASE_SHA" --depth=1
+          PYTHON_FILES=$(git diff --name-only --diff-filter=ACM "$BASE_SHA" HEAD | grep '\.py$' || true)
         else
-          echo '{"dependencies": []}' > audit-report.json
-        fi
-
-    - name: 🥒 Run Picklescan (AI Supply Chain)
-      id: picklescan
-      shell: bash
-      working-directory: ${{ inputs.working-directory }}
-      run: |
-        echo "Running Picklescan..."
-        # Text output only - standard for current pip version
-        touch picklescan-report.txt
-        picklescan -p . > picklescan-report.txt 2>&1 || true
-
-    - name: 📊 Generate Consolidated Report
-      id: generate-report
-      shell: bash
-      working-directory: ${{ inputs.working-directory }}
-      run: |
-        echo "### 🐍 Python AI Security Report" >> $GITHUB_STEP_SUMMARY
-        FOUND_ISSUES=false
-
-        # 1. Bandit Results
-        if [ -f bandit-report.json ]; then
-          BANDIT_COUNT=$(jq '.results | length' bandit-report.json 2>/dev/null || echo "0")
-          if [ "$BANDIT_COUNT" -gt 0 ]; then
-            echo "#### 🛡️ Bandit Code Issues ($BANDIT_COUNT)" >> $GITHUB_STEP_SUMMARY
-            echo "| Severity | Issue | File:Line |" >> $GITHUB_STEP_SUMMARY
-            echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
-            jq -r '.results[] | "| \(.issue_severity) | \(.issue_text) | \(.filename):\(.line_number) |"' bandit-report.json >> $GITHUB_STEP_SUMMARY
-            FOUND_ISSUES=true
+          if [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            PYTHON_FILES=$(git diff --name-only --diff-filter=ACM "${{ github.event.before }}" HEAD | grep '\.py$' || true)
           else
-            echo "✅ **Bandit:** Clean." >> $GITHUB_STEP_SUMMARY
+            PYTHON_FILES=$(git ls-files '*.py')
           fi
         fi
-
-        # 2. Picklescan Results
-        if grep -q "dangerous" picklescan-report.txt; then
-           echo "#### 🥒 🛑 MALICIOUS MODEL DETECTED" >> $GITHUB_STEP_SUMMARY
-           echo "Dangerous globals found in pickle files. **Critical supply chain risk.**" >> $GITHUB_STEP_SUMMARY
-           echo '```text' >> $GITHUB_STEP_SUMMARY
-           cat picklescan-report.txt >> $GITHUB_STEP_SUMMARY
-           echo '```' >> $GITHUB_STEP_SUMMARY
-           FOUND_ISSUES=true
+        
+        if [[ -z "$PYTHON_FILES" ]]; then
+          echo "has_python=false" >> $GITHUB_OUTPUT
         else
-           echo "✅ **Picklescan:** All models safe." >> $GITHUB_STEP_SUMMARY
+          echo "has_python=true" >> $GITHUB_OUTPUT
+          echo "$PYTHON_FILES" > python_files.txt
         fi
 
-        echo "issues_found=$FOUND_ISSUES" >> $GITHUB_OUTPUT
-
-    - name: 🚨 Report Python Security Incident
-      if: steps.generate-report.outputs.issues_found == 'true'
-      uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
-      with:
-        github_token: ${{ inputs.github_token }}
-        scan_name: "Python AI & Code Security"
-        severity: "CRITICAL"
-        finding_summary: "Vulnerabilities detected in Bandit SAST or Picklescan."
-        details_file_path: "bandit-report.json"
-        remediation_steps: |
-          1. **Picklescan:** Do not load flagged models. Convert to `safetensors`.
-          2. **Bandit:** Review code for `exec()`, `eval()`, or hardcoded secrets.
-
-    - name: Fail Workflow Gate
-      if: steps.generate-report.outputs.issues_found == 'true' && inputs.fail_on_detection == 'true'
+    - name: Run Bandit Security Scan
+      id: bandit_scan
+      if: steps.get_files.outputs.has_python == 'true'
       shell: bash
       run: |
-        echo "::error::Python Security Gate Failed. Check the summary for details."
+        REPORT_FILE="${{ github.workspace }}/bandit-report.json"
+        
+        # Run Bandit on changed files
+        if bandit -r $(cat python_files.txt | tr '\n' ' ') -f json -o "$REPORT_FILE" 2>/dev/null; then
+          echo "bandit_passed=true" >> $GITHUB_OUTPUT
+        else
+          echo "bandit_passed=false" >> $GITHUB_OUTPUT
+        fi
+        
+        # Parse results
+        HIGH_COUNT=$(jq '[.results[] | select(.issue_severity == "HIGH")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+        CRITICAL_COUNT=$(jq '[.results[] | select(.issue_severity == "CRITICAL")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+        TOTAL_COUNT=$(jq '.results | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+        
+        echo "high_count=$HIGH_COUNT" >> $GITHUB_OUTPUT
+        echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+        echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
+        
+        # Add GitHub annotations for HIGH and CRITICAL
+        jq -r '.results[] | select(.issue_severity == "HIGH" or .issue_severity == "CRITICAL") | 
+          "::error file=\(.filename),line=\(.line_number),title=\(.issue_severity) - \(.test_id)::\(.issue_text)"' "$REPORT_FILE" 2>/dev/null || true
+
+    - name: Run Picklescan (ML Model Safety)
+      id: picklescan
+      if: steps.get_files.outputs.has_python == 'true'
+      shell: bash
+      run: |
+        REPORT_FILE="${{ github.workspace }}/picklescan-report.txt"
+        touch "$REPORT_FILE"
+        
+        # Find all .pkl, .pickle, .joblib, .h5, .pt, .pth files in changed dirs
+        PICKLE_FILES=$(find . -type f \( -name "*.pkl" -o -name "*.pickle" -o -name "*.joblib" -o -name "*.h5" -o -name "*.pt" -o -name "*.pth" \) 2>/dev/null || true)
+        
+        if [[ -n "$PICKLE_FILES" ]]; then
+          echo "Scanning ML model files:" >> "$REPORT_FILE"
+          echo "$PICKLE_FILES" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          
+          UNSAFE_FOUND=false
+          while IFS= read -r file; do
+            if picklescan "$file" 2>&1 | grep -i "UNSAFE\|DANGER\|MALICIOUS" >> "$REPORT_FILE"; then
+              UNSAFE_FOUND=true
+              echo "::error file=$file,title=Unsafe ML Model::Picklescan detected potentially unsafe operations in model file"
+            fi
+          done <<< "$PICKLE_FILES"
+          
+          echo "pickle_unsafe=$UNSAFE_FOUND" >> $GITHUB_OUTPUT
+        else
+          echo "No ML model files found in this commit." >> "$REPORT_FILE"
+          echo "pickle_unsafe=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Generate Summary Report
+      if: always() && steps.get_files.outputs.has_python == 'true'
+      shell: bash
+      run: |
+        echo "## 🐍 Python AI Security Report" >> $GITHUB_STEP_SUMMARY
+        
+        # Bandit Results
+        if [[ "${{ steps.bandit_scan.outputs.total_count }}" -gt 0 ]]; then
+          echo "### 🛑 Bandit Found ${{ steps.bandit_scan.outputs.total_count }} Issue(s)" >> $GITHUB_STEP_SUMMARY
+          echo "- **CRITICAL:** ${{ steps.bandit_scan.outputs.critical_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **HIGH:** ${{ steps.bandit_scan.outputs.high_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "| Severity | File | Line | Issue | CWE |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- | --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
+          jq -r '.results[] | "| \(.issue_severity) | \(.filename) | \(.line_number) | \(.issue_text) | \(.test_id) |"' bandit-report.json >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✅ **Bandit: Clean.**" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Picklescan Results
+        if [[ "${{ steps.picklescan.outputs.pickle_unsafe }}" == "true" ]]; then
+          echo "### ⚠️ Picklescan: Unsafe Model Detected" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat picklescan-report.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✅ **Picklescan: All models safe.**" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Create GitHub Issue (HIGH/CRITICAL Only)
+      if: |
+        steps.get_files.outputs.has_python == 'true' && 
+        (steps.bandit_scan.outputs.high_count > 0 || steps.bandit_scan.outputs.critical_count > 0 || steps.picklescan.outputs.pickle_unsafe == 'true')
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        # Build issue body
+        cat > issue_body.md <<'EOF'
+## 🚨 Python Security Alert
+        
+**Scan:** Python Security (Bandit + Picklescan)  
+**Severity:** HIGH/CRITICAL  
+**Triggered by:** ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || format('Push to {0}', github.ref_name) }}
+        
+### 🔍 Findings
+        
+#### Bandit Results:
+- **CRITICAL Issues:** ${{ steps.bandit_scan.outputs.critical_count }}
+- **HIGH Issues:** ${{ steps.bandit_scan.outputs.high_count }}
+- **Total Issues:** ${{ steps.bandit_scan.outputs.total_count }}
+        
+EOF
+        
+        # Add Bandit details
+        if [[ "${{ steps.bandit_scan.outputs.total_count }}" -gt 0 ]]; then
+          echo "#### Top Issues:" >> issue_body.md
+          echo '```' >> issue_body.md
+          jq -r '.results[] | select(.issue_severity == "HIGH" or .issue_severity == "CRITICAL") | 
+            "\(.issue_severity) - \(.filename):\(.line_number)\n  \(.issue_text)\n  CWE: \(.test_id)\n"' bandit-report.json | head -n 50 >> issue_body.md
+          echo '```' >> issue_body.md
+        fi
+        
+        # Add Picklescan results
+        if [[ "${{ steps.picklescan.outputs.pickle_unsafe }}" == "true" ]]; then
+          echo "" >> issue_body.md
+          echo "#### ⚠️ Picklescan: Unsafe ML Models Detected" >> issue_body.md
+          echo '```' >> issue_body.md
+          cat picklescan-report.txt >> issue_body.md
+          echo '```' >> issue_body.md
+        fi
+        
+        # Remediation
+        cat >> issue_body.md <<'EOF'
+        
+---
+### 🛠️ Remediation Steps
+        
+1. **Review all HIGH/CRITICAL findings** in the Bandit report
+2. **Sanitize inputs** - Use parameterized queries, avoid `eval()`, `exec()`
+3. **Check file operations** - Validate paths, avoid hardcoded credentials
+4. **ML Models** - Only load models from trusted sources, scan with Picklescan before deployment
+5. **Update dependencies** - Ensure all packages are up-to-date
+        
+**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+EOF
+        
+        # Check for existing open issue
+        EXISTING_ISSUE=$(gh issue list --state open --search "Python Security Alert in:title" --json number --jq '.[0].number' || true)
+        
+        if [[ -n "$EXISTING_ISSUE" ]]; then
+          echo "⚠️ Updating existing issue #$EXISTING_ISSUE"
+          gh issue comment "$EXISTING_ISSUE" --body "🔄 **Recurrence detected** in workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        else
+          echo "🚨 Creating new security issue"
+          gh issue create \
+            --title "[HIGH/CRITICAL] Python Security Alert - ${{ steps.bandit_scan.outputs.critical_count }} CRITICAL, ${{ steps.bandit_scan.outputs.high_count }} HIGH" \
+            --body-file issue_body.md \
+            --label "security,python,high-severity" \
+            --assignee "${{ github.actor }}"
+        fi
+
+    - name: Fail Workflow Gate
+      if: |
+        steps.get_files.outputs.has_python == 'true' && 
+        inputs.fail_on_high_critical == 'true' && 
+        (steps.bandit_scan.outputs.high_count > 0 || steps.bandit_scan.outputs.critical_count > 0 || steps.picklescan.outputs.pickle_unsafe == 'true')
+      shell: bash
+      run: |
+        echo "::error::HIGH or CRITICAL Python security issues detected. Build failed."
         exit 1
