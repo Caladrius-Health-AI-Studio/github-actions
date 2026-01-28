@@ -77,6 +77,7 @@ runs:
       if: steps.generate_summary.outputs.found_issues == 'true'
       uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
+        github_token: ${{ inputs.github_token }}  # ← ADD THIS!
         scan_name: "Web Stack Security"
         severity: "HIGH"
         finding_summary: "${{ steps.semgrep_run.outputs.vuln_count }} Web/API vulnerabilities detected."
