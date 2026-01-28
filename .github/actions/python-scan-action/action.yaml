@@ -69,10 +69,6 @@ runs:
         echo "high_count=$HIGH_COUNT" >> $GITHUB_OUTPUT
         echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
         echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
-        
-        # Add GitHub annotations for HIGH and CRITICAL
-        jq -r '.results[] | select(.issue_severity == "HIGH" or .issue_severity == "CRITICAL") | 
-          "::error file=\(.filename),line=\(.line_number),title=\(.issue_severity) - \(.test_id)::\(.issue_text)"' "$REPORT_FILE" 2>/dev/null || true
 
     - name: Run Picklescan (ML Model Safety)
       id: picklescan
@@ -94,7 +90,6 @@ runs:
           while IFS= read -r file; do
             if picklescan "$file" 2>&1 | grep -i "UNSAFE\|DANGER\|MALICIOUS" >> "$REPORT_FILE"; then
               UNSAFE_FOUND=true
-              echo "::error file=$file,title=Unsafe ML Model::Picklescan detected potentially unsafe operations in model file"
             fi
           done <<< "$PICKLE_FILES"
           
@@ -145,24 +140,27 @@ runs:
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
         # Build issue body
-        cat > issue_body.md <<'EOF'
-## 🚨 Python Security Alert
+        CRITICAL_COUNT="${{ steps.bandit_scan.outputs.critical_count }}"
+        HIGH_COUNT="${{ steps.bandit_scan.outputs.high_count }}"
+        TOTAL_COUNT="${{ steps.bandit_scan.outputs.total_count }}"
+        PICKLE_UNSAFE="${{ steps.picklescan.outputs.pickle_unsafe }}"
         
-**Scan:** Python Security (Bandit + Picklescan)  
-**Severity:** HIGH/CRITICAL  
-**Triggered by:** ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || format('Push to {0}', github.ref_name) }}
-        
-### 🔍 Findings
-        
-#### Bandit Results:
-- **CRITICAL Issues:** ${{ steps.bandit_scan.outputs.critical_count }}
-- **HIGH Issues:** ${{ steps.bandit_scan.outputs.high_count }}
-- **Total Issues:** ${{ steps.bandit_scan.outputs.total_count }}
-        
-EOF
+        echo "## 🚨 Python Security Alert" > issue_body.md
+        echo "" >> issue_body.md
+        echo "**Scan:** Python Security (Bandit + Picklescan)" >> issue_body.md
+        echo "**Severity:** HIGH/CRITICAL" >> issue_body.md
+        echo "**Triggered by:** ${{ github.event_name }} on ${{ github.ref_name }}" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "### 🔍 Findings" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "#### Bandit Results:" >> issue_body.md
+        echo "- **CRITICAL Issues:** $CRITICAL_COUNT" >> issue_body.md
+        echo "- **HIGH Issues:** $HIGH_COUNT" >> issue_body.md
+        echo "- **Total Issues:** $TOTAL_COUNT" >> issue_body.md
+        echo "" >> issue_body.md
         
         # Add Bandit details
-        if [[ "${{ steps.bandit_scan.outputs.total_count }}" -gt 0 ]]; then
+        if [[ "$TOTAL_COUNT" -gt 0 ]]; then
           echo "#### Top Issues:" >> issue_body.md
           echo '```' >> issue_body.md
           jq -r '.results[] | select(.issue_severity == "HIGH" or .issue_severity == "CRITICAL") | 
@@ -171,7 +169,7 @@ EOF
         fi
         
         # Add Picklescan results
-        if [[ "${{ steps.picklescan.outputs.pickle_unsafe }}" == "true" ]]; then
+        if [[ "$PICKLE_UNSAFE" == "true" ]]; then
           echo "" >> issue_body.md
           echo "#### ⚠️ Picklescan: Unsafe ML Models Detected" >> issue_body.md
           echo '```' >> issue_body.md
@@ -180,19 +178,17 @@ EOF
         fi
         
         # Remediation
-        cat >> issue_body.md <<'EOF'
-        
----
-### 🛠️ Remediation Steps
-        
-1. **Review all HIGH/CRITICAL findings** in the Bandit report
-2. **Sanitize inputs** - Use parameterized queries, avoid `eval()`, `exec()`
-3. **Check file operations** - Validate paths, avoid hardcoded credentials
-4. **ML Models** - Only load models from trusted sources, scan with Picklescan before deployment
-5. **Update dependencies** - Ensure all packages are up-to-date
-        
-**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-EOF
+        echo "" >> issue_body.md
+        echo "---" >> issue_body.md
+        echo "### 🛠️ Remediation Steps" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "1. **Review all HIGH/CRITICAL findings** in the Bandit report" >> issue_body.md
+        echo "2. **Sanitize inputs** - Use parameterized queries, avoid \`eval()\`, \`exec()\`" >> issue_body.md
+        echo "3. **Check file operations** - Validate paths, avoid hardcoded credentials" >> issue_body.md
+        echo "4. **ML Models** - Only load models from trusted sources, scan with Picklescan before deployment" >> issue_body.md
+        echo "5. **Update dependencies** - Ensure all packages are up-to-date" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> issue_body.md
         
         # Check for existing open issue
         EXISTING_ISSUE=$(gh issue list --state open --search "Python Security Alert in:title" --json number --jq '.[0].number' || true)
@@ -203,7 +199,7 @@ EOF
         else
           echo "🚨 Creating new security issue"
           gh issue create \
-            --title "[HIGH/CRITICAL] Python Security Alert - ${{ steps.bandit_scan.outputs.critical_count }} CRITICAL, ${{ steps.bandit_scan.outputs.high_count }} HIGH" \
+            --title "[HIGH/CRITICAL] Python Security Alert - $CRITICAL_COUNT CRITICAL, $HIGH_COUNT HIGH" \
             --body-file issue_body.md \
             --label "security,python,high-severity" \
             --assignee "${{ github.actor }}"
