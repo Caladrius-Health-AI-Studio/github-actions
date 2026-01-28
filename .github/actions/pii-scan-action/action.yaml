@@ -193,15 +193,15 @@ runs:
         exit 1
         
     - name: 🚨 Report PII Incident
-        # Only run if PII was found
-        if: steps.scan_sensitive_info.outputs.sensitive_info == 'true'
-        uses: Caladrius-Health-AI-Studio-org/github-actions/report-security-issue@main
-        with:
-          scan_name: "PII Detection"
-          severity: "CRITICAL"
-          finding_summary: "${{ steps.scan_sensitive_info.outputs.violation_count }} PII instances (Aadhaar/PAN/Phone) detected."
-          details_file_path: "violations_report.txt"
-          remediation_steps: |
-            1. **Rotate Secrets:** If API keys were found, revoke them immediately.
-            2. **Scrub History:** Use `git filter-repo` to remove the file from Git history. Do NOT just delete the file in a new commit.
-            3. **Mock Data:** Use dummy data for testing (e.g., `1234-5678-9012` for Aadhaar).
+      # Only run if PII was found
+      if: steps.scan_sensitive_info.outputs.sensitive_info == 'true'
+      uses: Caladrius-Health-AI-Studio-org/github-actions/report-security-issue@main
+      with:
+        scan_name: "PII Detection"
+        severity: "CRITICAL"
+        finding_summary: "${{ steps.scan_sensitive_info.outputs.violation_count }} PII instances (Aadhaar/PAN/Phone) detected."
+        details_file_path: "violations_report.txt"
+        remediation_steps: |
+          1. **Rotate Secrets:** If API keys were found, revoke them immediately.
+          2. **Scrub History:** Use `git filter-repo` to remove the file from Git history. Do NOT just delete the file in a new commit.
+          3. **Mock Data:** Use dummy data for testing (e.g., `1234-5678-9012` for Aadhaar).
