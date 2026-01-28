@@ -26,16 +26,13 @@ runs:
     - name: Install Security Tools
       shell: bash
       run: |
-        # Install ESLint 8 (v9 has breaking config changes)
         npm install -g eslint@8 eslint-plugin-security --silent
-        
-        # Install Semgrep
         pip install semgrep --quiet
 
     - name: Create ESLint Config
       shell: bash
       run: |
-        cat > .eslintrc.json <<'EOF'
+        cat > .eslintrc.json << 'ESLINTEOF'
 {
   "env": {
     "browser": true,
@@ -58,7 +55,7 @@ runs:
     "security/detect-unsafe-regex": "error"
   }
 }
-EOF
+ESLINTEOF
 
     - name: Run ESLint Security Scan
       id: eslint_scan
@@ -66,10 +63,8 @@ EOF
       run: |
         REPORT_FILE="${{ github.workspace }}/eslint-report.json"
         
-        # Run ESLint (allow failure, we'll parse results)
         eslint . --ext .js,.jsx,.ts,.tsx --format json --output-file "$REPORT_FILE" || true
         
-        # Parse results
         if [[ -f "$REPORT_FILE" ]]; then
           TOTAL_ISSUES=$(jq '[.[] | .messages[]] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
           ERROR_COUNT=$(jq '[.[] | .messages[] | select(.severity == 2)] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
@@ -78,11 +73,6 @@ EOF
           echo "eslint_total=$TOTAL_ISSUES" >> $GITHUB_OUTPUT
           echo "eslint_errors=$ERROR_COUNT" >> $GITHUB_OUTPUT
           echo "eslint_warnings=$WARNING_COUNT" >> $GITHUB_OUTPUT
-          
-          # Add annotations for errors
-          jq -r '.[] | select(.messages | length > 0) | .filePath as $file | 
-            .messages[] | select(.severity == 2) | 
-            "::error file=\($file),line=\(.line),title=ESLint Error::\(.message) (\(.ruleId))"' "$REPORT_FILE" 2>/dev/null || true
         else
           echo "eslint_total=0" >> $GITHUB_OUTPUT
           echo "eslint_errors=0" >> $GITHUB_OUTPUT
@@ -95,7 +85,6 @@ EOF
       run: |
         REPORT_FILE="${{ github.workspace }}/semgrep-report.json"
         
-        # Run Semgrep with multiple rulesets
         semgrep scan \
           --config p/nodejs \
           --config p/react \
@@ -107,7 +96,6 @@ EOF
           --output "$REPORT_FILE" \
           --quiet || true
         
-        # Parse results
         if [[ -f "$REPORT_FILE" ]]; then
           CRITICAL_COUNT=$(jq '[.results[] | select(.extra.severity == "CRITICAL")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
           HIGH_COUNT=$(jq '[.results[] | select(.extra.severity == "HIGH")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
@@ -120,10 +108,6 @@ EOF
           echo "semgrep_medium=$MEDIUM_COUNT" >> $GITHUB_OUTPUT
           echo "semgrep_low=$LOW_COUNT" >> $GITHUB_OUTPUT
           echo "semgrep_total=$TOTAL_COUNT" >> $GITHUB_OUTPUT
-          
-          # Add annotations for HIGH and CRITICAL
-          jq -r '.results[] | select(.extra.severity == "HIGH" or .extra.severity == "CRITICAL") | 
-            "::error file=\(.path),line=\(.start.line),title=\(.extra.severity) - \(.check_id)::\(.extra.message)"' "$REPORT_FILE" 2>/dev/null || true
         else
           echo "semgrep_critical=0" >> $GITHUB_OUTPUT
           echo "semgrep_high=0" >> $GITHUB_OUTPUT
@@ -178,30 +162,34 @@ EOF
       env:
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
-        # Build issue body
-        cat > issue_body.md <<'EOF'
-## 🚨 Web Stack Security Alert (MERN)
+        CRITICAL_COUNT="${{ steps.semgrep_scan.outputs.semgrep_critical }}"
+        HIGH_COUNT="${{ steps.semgrep_scan.outputs.semgrep_high }}"
+        MEDIUM_COUNT="${{ steps.semgrep_scan.outputs.semgrep_medium }}"
+        LOW_COUNT="${{ steps.semgrep_scan.outputs.semgrep_low }}"
+        ESLINT_ERRORS="${{ steps.eslint_scan.outputs.eslint_errors }}"
+        ESLINT_WARNINGS="${{ steps.eslint_scan.outputs.eslint_warnings }}"
         
-**Scan:** Backend Security (Semgrep + ESLint)  
-**Severity:** HIGH/CRITICAL  
-**Triggered by:** ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || format('Push to {0}', github.ref_name) }}
-        
-### 🔍 Findings Summary
-        
-#### Semgrep Results:
-- **CRITICAL:** ${{ steps.semgrep_scan.outputs.semgrep_critical }}
-- **HIGH:** ${{ steps.semgrep_scan.outputs.semgrep_high }}
-- **MEDIUM:** ${{ steps.semgrep_scan.outputs.semgrep_medium }}
-- **LOW:** ${{ steps.semgrep_scan.outputs.semgrep_low }}
-        
-#### ESLint Results:
-- **Errors:** ${{ steps.eslint_scan.outputs.eslint_errors }}
-- **Warnings:** ${{ steps.eslint_scan.outputs.eslint_warnings }}
-        
-EOF
+        echo "## 🚨 Web Stack Security Alert (MERN)" > issue_body.md
+        echo "" >> issue_body.md
+        echo "**Scan:** Backend Security (Semgrep + ESLint)" >> issue_body.md
+        echo "**Severity:** HIGH/CRITICAL" >> issue_body.md
+        echo "**Triggered by:** ${{ github.event_name }} on ${{ github.ref_name }}" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "### 🔍 Findings Summary" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "#### Semgrep Results:" >> issue_body.md
+        echo "- **CRITICAL:** $CRITICAL_COUNT" >> issue_body.md
+        echo "- **HIGH:** $HIGH_COUNT" >> issue_body.md
+        echo "- **MEDIUM:** $MEDIUM_COUNT" >> issue_body.md
+        echo "- **LOW:** $LOW_COUNT" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "#### ESLint Results:" >> issue_body.md
+        echo "- **Errors:** $ESLINT_ERRORS" >> issue_body.md
+        echo "- **Warnings:** $ESLINT_WARNINGS" >> issue_body.md
+        echo "" >> issue_body.md
         
         # Add Semgrep HIGH/CRITICAL details
-        if [[ "${{ steps.semgrep_scan.outputs.semgrep_critical }}" -gt 0 ]] || [[ "${{ steps.semgrep_scan.outputs.semgrep_high }}" -gt 0 ]]; then
+        if [[ "$CRITICAL_COUNT" -gt 0 ]] || [[ "$HIGH_COUNT" -gt 0 ]]; then
           echo "### 🔴 Critical & High Severity Issues" >> issue_body.md
           echo '```' >> issue_body.md
           jq -r '.results[] | select(.extra.severity == "CRITICAL" or .extra.severity == "HIGH") | 
@@ -210,7 +198,7 @@ EOF
         fi
         
         # Add ESLint errors
-        if [[ "${{ steps.eslint_scan.outputs.eslint_errors }}" -gt 0 ]]; then
+        if [[ "$ESLINT_ERRORS" -gt 0 ]]; then
           echo "" >> issue_body.md
           echo "### ⚠️ ESLint Security Errors" >> issue_body.md
           echo '```' >> issue_body.md
@@ -221,30 +209,28 @@ EOF
         fi
         
         # Remediation
-        cat >> issue_body.md <<'EOF'
-        
----
-### 🛠️ Remediation Steps
-        
-#### Frontend (React):
-1. **XSS Prevention:** Avoid `dangerouslySetInnerHTML`, sanitize user inputs
-2. **State Management:** Validate props, use PropTypes or TypeScript
-3. **API Calls:** Use HTTPS, validate responses, implement CSRF tokens
-        
-#### Backend (Node.js/Express):
-1. **Input Validation:** Sanitize all inputs, use libraries like `validator.js`
-2. **SQL/NoSQL Injection:** Use parameterized queries, avoid string concatenation
-3. **Authentication:** Implement JWT properly, use `bcrypt` for passwords
-4. **Headers:** Install and configure `helmet.js` for security headers
-5. **Rate Limiting:** Use `express-rate-limit` to prevent abuse
-        
-#### General:
-- Update all dependencies to latest secure versions
-- Review OWASP Top 10 guidelines
-- Implement security linting in pre-commit hooks
-        
-**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-EOF
+        echo "" >> issue_body.md
+        echo "---" >> issue_body.md
+        echo "### 🛠️ Remediation Steps" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "#### Frontend (React):" >> issue_body.md
+        echo "1. **XSS Prevention:** Avoid \`dangerouslySetInnerHTML\`, sanitize user inputs" >> issue_body.md
+        echo "2. **State Management:** Validate props, use PropTypes or TypeScript" >> issue_body.md
+        echo "3. **API Calls:** Use HTTPS, validate responses, implement CSRF tokens" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "#### Backend (Node.js/Express):" >> issue_body.md
+        echo "1. **Input Validation:** Sanitize all inputs, use libraries like \`validator.js\`" >> issue_body.md
+        echo "2. **SQL/NoSQL Injection:** Use parameterized queries, avoid string concatenation" >> issue_body.md
+        echo "3. **Authentication:** Implement JWT properly, use \`bcrypt\` for passwords" >> issue_body.md
+        echo "4. **Headers:** Install and configure \`helmet.js\` for security headers" >> issue_body.md
+        echo "5. **Rate Limiting:** Use \`express-rate-limit\` to prevent abuse" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "#### General:" >> issue_body.md
+        echo "- Update all dependencies to latest secure versions" >> issue_body.md
+        echo "- Review OWASP Top 10 guidelines" >> issue_body.md
+        echo "- Implement security linting in pre-commit hooks" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> issue_body.md
         
         # Check for existing open issue
         EXISTING_ISSUE=$(gh issue list --state open --search "Web Stack Security Alert in:title" --json number --jq '.[0].number' || true)
@@ -255,7 +241,7 @@ EOF
         else
           echo "🚨 Creating new security issue"
           gh issue create \
-            --title "[HIGH/CRITICAL] Web Stack Security Alert - ${{ steps.semgrep_scan.outputs.semgrep_critical }} CRITICAL, ${{ steps.semgrep_scan.outputs.semgrep_high }} HIGH" \
+            --title "[HIGH/CRITICAL] Web Stack Security Alert - $CRITICAL_COUNT CRITICAL, $HIGH_COUNT HIGH" \
             --body-file issue_body.md \
             --label "security,backend,high-severity,MERN" \
             --assignee "${{ github.actor }}"
