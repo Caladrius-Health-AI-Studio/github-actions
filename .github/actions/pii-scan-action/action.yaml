@@ -15,7 +15,7 @@ runs:
   using: "composite"
   steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
@@ -23,33 +23,25 @@ runs:
       id: list_files
       shell: bash
       run: |
-        # Handle both push and pull request events
         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          echo "Pull Request - Base SHA: $BASE_SHA"
           git fetch origin "$BASE_SHA" --depth=1
           git diff --name-status "$BASE_SHA" HEAD > files_changed.txt
         else
-          # For push events, compare with previous commit safely
           if [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
             BASE_SHA="${{ github.event.before }}"
           else
             BASE_SHA="HEAD^"
           fi
-          echo "Push - Base SHA: $BASE_SHA"
           git diff --name-status "$BASE_SHA" HEAD > files_changed.txt || echo "A all_files" > files_changed.txt
         fi
-        
-        # If file is empty (e.g. initial commit), list all files
-        if [ ! -s files_changed.txt ]; then
-          git ls-files | awk '{print "A\t" $0}' > files_changed.txt
-        fi
+        [ ! -s files_changed.txt ] && git ls-files | awk '{print "A\t" $0}' > files_changed.txt
 
     - name: Scan for sensitive information
       id: scan_sensitive_info
       shell: bash
       run: |
-        # 1. DEFINITIONS & CONFIGURATION
+        # 1. DEFINITIONS
         declare -A regex_patterns=(
           ["PAN"]='\b[A-Z]{5}[0-9]{4}[A-Z]\b'
           ["Aadhaar"]='\b[2-9][0-9]{3}\s[0-9]{4}\s[0-9]{4}\b'
@@ -59,151 +51,79 @@ runs:
           ["API Key"]='(api_key|apikey|api-key).{0,20}(["'\''])[0-9a-zA-Z_-]{16,}\2'
           ["Secret Token"]='(secret|token|access_token).{0,20}(["'\''])[0-9a-zA-Z_-]{16,}\2'
         )
-
-        # Exclusion Lists
         exclude_extensions=("yml" "yaml" "env" "mod" "sum" "svg" "lock" "md" "png" "jpg" "jpeg" "json")
         exclude_files=("package.json" "package-lock.json" "yarn.lock" "go.sum" "go.mod" "example.env")
         exclude_dirs=("tests" "test" "__tests__" "__mocks__" "mocks" "fixtures" "docs" "node_modules" "dist" "build")
 
-        # 2. HELPER FUNCTIONS
-        should_skip_file() {
-            local file="$1"
-            local filename=$(basename "$file")
-            local extension="${filename##*.}"
-            
-            # Check Extensions
-            for ext in "${exclude_extensions[@]}"; do
-                if [[ "$extension" == "$ext" ]]; then return 0; fi
-            done
-
-            # Check Specific Filenames
-            for exc_file in "${exclude_files[@]}"; do
-                if [[ "$filename" == "$exc_file" ]]; then return 0; fi
-            done
-
-            # Check Directories
-            for dir in "${exclude_dirs[@]}"; do
-                if [[ "$file" == *"/$dir/"* || "$file" == "$dir/"* ]]; then return 0; fi
-            done
-
-            return 1 # Do not skip
-        }
-
-        scan_file() {
-            local file="$1"
-            local is_test_file="$2"
-
-            if [[ ! -f "$file" ]]; then return; fi
-
-            # If not a test file, apply exclusions
-            if [[ "$is_test_file" == "false" ]]; then
-                if should_skip_file "$file"; then return; fi
-            fi
-
-            # Run Scans
-            for info_type in "${!regex_patterns[@]}"; do
-                local pattern="${regex_patterns[$info_type]}"
-                
-                # Use grep -P for Perl-regex support (robust) with line numbers (-n) and only matching parts (-o)
-                # We pipe to 'head -1' to avoid flooding logs if a file has 1000 emails
-                local match
-                match=$(grep -nP "$pattern" "$file" | head -n 5)
-
-                if [[ -n "$match" ]]; then
-                    found_sensitive_info=true
-                    
-                    while IFS= read -r line_match; do
-                        local line_num=$(echo "$line_match" | cut -d: -f1)
-                        local content=$(echo "$line_match" | cut -d: -f2-)
-                        
-                        # Record violation
-                        echo "::warning file=$file,line=$line_num,title=$info_type Detected::$content"
-                        echo "- **$info_type**: \`$file:$line_num\`" >> violations_report.txt
-                        
-                        ((total_violations++))
-                    done <<< "$match"
-                    
-                    # Track unique files
-                    if [[ ! " ${files_with_sensitive_info[@]} " =~ " ${file} " ]]; then
-                        files_with_sensitive_info+=("$file")
-                    fi
-                fi
-            done
-        }
-
-        # 3. MAIN EXECUTION
-        echo "Starting PII Scan..."
+        # 2. SCAN LOGIC
         found_sensitive_info=false
         total_violations=0
-        files_with_sensitive_info=()
-        echo "## 🛡️ PII Violations Report" > violations_report.txt
+        touch violations_report.txt
 
-        # Process Changed Files
         while IFS= read -r line; do
-            status=$(echo "$line" | awk '{print $1}')
-            file=$(echo "$line" | awk '{$1=""; print $0}' | sed 's/^[ \t]*//')
+          status=$(echo "$line" | awk '{print $1}')
+          file=$(echo "$line" | awk '{$1=""; print $0}' | sed 's/^[ \t]*//')
+          [[ "$status" == R* ]] && file=$(echo "$file" | awk '{print $2}')
+          [[ "$status" == "D" || ! -f "$file" ]] && continue
+          
+          # Simplified skip check for clarity
+          SKIP=false
+          for ext in "${exclude_extensions[@]}"; do [[ "$file" == *."$ext" ]] && SKIP=true; done
+          [[ "$file" == *"test-pii-data"* ]] && SKIP=false # Force test files
 
-            # Handle Renames (Git output: R100 oldname newname)
-            if [[ "$status" == R* ]]; then
-                file=$(echo "$file" | awk '{print $2}')
-            fi
-
-            # Check if deleted
-            if [[ "$status" == "D" ]]; then continue; fi
-            
-            # Check for force-include test files
-            if [[ "$file" == *"test-pii-data"* || "$file" == *"testpii"* ]]; then
-                scan_file "$file" "true"
-            else
-                scan_file "$file" "false"
-            fi
-
+          if [[ "$SKIP" == "false" ]]; then
+            for info_type in "${!regex_patterns[@]}"; do
+              pattern="${regex_patterns[$info_type]}"
+              match=$(grep -nP "$pattern" "$file" | head -n 5)
+              if [[ -n "$match" ]]; then
+                found_sensitive_info=true
+                while IFS= read -r line_match; do
+                  line_num=$(echo "$line_match" | cut -d: -f1)
+                  content=$(echo "$line_match" | cut -d: -f2-)
+                  echo "::error file=$file,line=$line_num,title=$info_type Detected::PII Found in $file"
+                  echo "- **$info_type**: \`$file:$line_num\`" >> violations_report.txt
+                  ((total_violations++))
+                done <<< "$match"
+              fi
+            done
+          fi
         done < files_changed.txt
 
-        # 4. OUTPUTS
         echo "sensitive_info=$found_sensitive_info" >> $GITHUB_OUTPUT
         echo "violation_count=$total_violations" >> $GITHUB_OUTPUT
-        
-        if [[ "$found_sensitive_info" == "true" ]]; then
-             echo "files_found=${files_with_sensitive_info[*]}" >> $GITHUB_OUTPUT
-        fi
 
     - name: Write Summary Report
       if: always()
       shell: bash
       run: |
         echo "## 🔐 Sensitive Data Scan Summary" >> $GITHUB_STEP_SUMMARY
+        VIOLATIONS="${{ steps.scan_sensitive_info.outputs.violation_count }}"
+        VIOLATIONS=${VIOLATIONS:-0}
         
-        # FIX: Default to '0' if the output is empty/null to prevent bash crash
-        VIOLATION_COUNT="${{ steps.scan_sensitive_info.outputs.violation_count }}"
-        VIOLATION_COUNT=${VIOLATION_COUNT:-0} 
-        
-        if [[ "$VIOLATION_COUNT" -gt 0 ]]; then
-            echo "### 🛑 Found $VIOLATION_COUNT violations" >> $GITHUB_STEP_SUMMARY
-            echo "Please review the files below and rotate any exposed secrets immediately." >> $GITHUB_STEP_SUMMARY
+        if [[ "$VIOLATIONS" -gt 0 ]]; then
+            echo "### 🛑 Found $VIOLATIONS PII violations" >> $GITHUB_STEP_SUMMARY
+            echo "Review the following findings and scrub history immediately:" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             [ -f violations_report.txt ] && cat violations_report.txt >> $GITHUB_STEP_SUMMARY
         else
             echo "✅ **No sensitive PII or secrets detected.**" >> $GITHUB_STEP_SUMMARY
         fi
 
-    - name: Fail Workflow
-      if: steps.scan_sensitive_info.outputs.sensitive_info == 'true' && inputs.fail_on_detection == 'true'
-      shell: bash
-      run: |
-        echo "::error::PII Scan failed with ${{ steps.scan_sensitive_info.outputs.violation_count }} violations."
-        exit 1
-        
     - name: 🚨 Report PII Incident
-      # Only run if PII was found
       if: steps.scan_sensitive_info.outputs.sensitive_info == 'true'
       uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
         scan_name: "PII Detection"
         severity: "CRITICAL"
-        finding_summary: "${{ steps.scan_sensitive_info.outputs.violation_count }} PII instances (Aadhaar/PAN/Phone) detected."
+        finding_summary: "${{ steps.scan_sensitive_info.outputs.violation_count }} PII instances detected."
         details_file_path: "violations_report.txt"
         remediation_steps: |
-          1. **Rotate Secrets:** If API keys were found, revoke them immediately.
-          2. **Scrub History:** Use `git filter-repo` to remove the file from Git history. Do NOT just delete the file in a new commit.
-          3. **Mock Data:** Use dummy data for testing (e.g., `1234-5678-9012` for Aadhaar).
+          1. Revoke any exposed API keys.
+          2. Use `git filter-repo` to scrub the leaked data from history.
+
+    - name: Fail Workflow Gate
+      if: steps.scan_sensitive_info.outputs.sensitive_info == 'true' && inputs.fail_on_detection == 'true'
+      shell: bash
+      run: |
+        echo "::error::PII Gate Failed. Blocking merge."
+        exit 1
