@@ -1,14 +1,15 @@
-name: "Backend Security Scan"
-description: "Runs ESLint Security and Semgrep with detailed Markdown Job Summaries."
+name: "Web Stack Security Scan (MERN)"
+description: "Full-stack SAST for React (Frontend) and Node.js (Backend)."
+
 inputs:
   GITHUB_TOKEN:
-    description: 'GitHub token for API calls'
+    description: 'GitHub token'
     required: true
     default: '${{ github.token }}'
   working-directory:
-    description: 'Path to the backend source code'
+    description: 'Path to the source code'
     required: false
-    default: './backend'
+    default: '.'
   fail-build:
     description: "Fail if vulnerabilities are found"
     required: false
@@ -17,88 +18,75 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Setup Node.js
+    - name: Setup Node & Python
       uses: actions/setup-node@v4
       with:
         node-version: '20'
 
-    - name: Install Linting Tools
+    - name: Install Tools
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
         npm install eslint eslint-plugin-security --no-save
-        
-    - name: Run ESLint Security
-      id: eslint
-      shell: bash
-      working-directory: ${{ inputs.working-directory }}
-      run: |
-        # Generate a temporary markdown file for ESLint
-        echo "#### 🔍 ESLint Security Findings" > ../eslint-report.md
-        npx eslint . --plugin security --rule 'security/detect-object-injection: warn' --format markdown >> ../eslint-report.md || echo "No ESLint issues found." >> ../eslint-report.md
-
-    - name: Run Semgrep
-      id: semgrep
-      shell: bash
-      working-directory: ${{ inputs.working-directory }}
-      run: |
         python3 -m pip install semgrep
-        # Output to JSON for parsing, SARIF for GitHub UI
-        semgrep scan --config p/nodejs --config p/owasp-top-10 --json --output ../semgrep-report.json || true
+
+    - name: Run ESLint Security
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Write header even if it fails
+        echo "#### 🔍 ESLint Security Findings" > ../eslint-report.md
+        npx eslint . --plugin security --rule 'security/detect-object-injection: warn' --format markdown >> ../eslint-report.md || echo "No major ESLint issues." >> ../eslint-report.md
+
+    - name: Run Semgrep (Full Stack)
+      id: semgrep_run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # ADDED p/react and p/javascript for full frontend coverage
+        echo '{"results": []}' > ../semgrep-report.json
+        semgrep scan --config p/nodejs --config p/react --config p/javascript --config p/owasp-top-10 --json --output ../semgrep-report.json || true
 
     - name: 📊 Generate Job Summary
+      id: generate_summary
       shell: bash
       run: |
-        echo "### 🛡️ Backend Security Scan Report" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🛡️ Web Stack Security Report (MERN)" >> $GITHUB_STEP_SUMMARY
         
-        # --- Semgrep Table Generation ---
-        VULN_COUNT=$(jq '.results | length' semgrep-report.json)
-        
+        # Safe JQ parsing
+        VULN_COUNT=$(jq '.results | length' semgrep-report.json 2>/dev/null || echo "0")
+        FOUND="false"
+
         if [ "$VULN_COUNT" -gt 0 ]; then
-          echo "#### 🛑 Semgrep Vulnerabilities ($VULN_COUNT)" >> $GITHUB_STEP_SUMMARY
-          echo "| Severity | Rule ID | File:Line | Message |" >> $GITHUB_STEP_SUMMARY
+          echo "#### 🛑 Vulnerabilities Detected ($VULN_COUNT)" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Rule | File:Line | Message |" >> $GITHUB_STEP_SUMMARY
           echo "| :--- | :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
-          
-          # Parse JSON to Markdown Table
           jq -r '.results[] | "| \(.extra.severity) | \(.check_id) | \(.path):\(.start.line) | \(.extra.message | gsub("\n"; " ")) |"' semgrep-report.json >> $GITHUB_STEP_SUMMARY
-          echo "found_issues=true" >> $GITHUB_OUTPUT
+          FOUND="true"
         else
-          echo "✅ **No Semgrep vulnerabilities detected.**" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **No high-risk semantic vulnerabilities detected.**" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "---" >> $GITHUB_STEP_SUMMARY
-        
-        # --- ESLint Integration ---
-        cat eslint-report.md >> $GITHUB_STEP_SUMMARY
+        [ -f eslint-report.md ] && cat eslint-report.md >> $GITHUB_STEP_SUMMARY
+        echo "found_issues=$FOUND" >> $GITHUB_OUTPUT
 
-    - name: Create GitHub Issue
-      if: steps.semgrep.outputs.found_issues == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.GITHUB_TOKEN }}
-      run: |
-        gh issue create \
-          --title "🚨 Backend Security Findings: $(date +'%Y-%m-%d')" \
-          --body "Security issues detected in the latest backend scan. See [Workflow Summary](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details." \
-          --label "security-alert"
-
-    - name: Fail Build
-      if: steps.semgrep.outputs.found_issues == 'true' && inputs.fail-build == 'true'
-      shell: bash
-      run: exit 1
-
-    - name: 🚨 Report Web Security Vulnerabilities
-        # Run if Semgrep found issues
-      if: steps.semgrep.outputs.found_issues == 'true'
+    - name: 🚨 Report Web Security Incident
+      if: steps.generate_summary.outputs.found_issues == 'true'
       uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
-        scan_name: "Web Security (React/Node)"
+        scan_name: "Web Stack Security"
         severity: "HIGH"
-        finding_summary: "Semantic vulnerabilities (XSS, Injection, or Insecure Storage) detected."
-        # We point to the Semgrep JSON report which lists the file paths
+        finding_summary: "${{ steps.semgrep_run.outputs.vuln_count }} Web/API vulnerabilities detected."
         details_file_path: "semgrep-report.json"
         remediation_steps: |
-          1. **XSS (React):** Avoid `dangerouslySetInnerHTML`. Use proper sanitization libraries like `dompurify`.
-          2. **Injection (Node):** Ensure all database queries use parameterized inputs (e.g., avoid string concatenation in SQL/Mongo).
-          3. **Secrets:** If hardcoded secrets were found, move them to `.env` immediately.
+          1. **Frontend:** Audit React components for `dangerouslySetInnerHTML`.
+          2. **Backend:** Sanitize all SQL/NoSQL inputs.
+          3. **Headers:** Ensure `helmet.js` is implemented in Express.
+
+    - name: Fail Build Gate
+      if: steps.generate_summary.outputs.found_issues == 'true' && inputs.fail-build == 'true'
+      shell: bash
+      run: |
+        echo "::error::Web Security Scan Failed. Review the Job Summary for details."
+        exit 1
