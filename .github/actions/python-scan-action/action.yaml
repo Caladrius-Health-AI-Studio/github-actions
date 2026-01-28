@@ -1,5 +1,5 @@
 name: 'Python AI & Security Scan'
-description: 'Scans Python code and AI models.'
+description: 'Scans Python code and AI models with Safe-Failure logic.'
 
 inputs:
   github_token:
@@ -10,7 +10,7 @@ inputs:
     description: 'Path to Python source code'
     required: false
     default: '.'
-  fail_on_detection:
+  fail_on_detection: # Consistent with your internal logic
     description: 'Fail workflow if critical issues are found'
     required: false
     default: 'true'
@@ -34,7 +34,8 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       run: |
         echo "Running Bandit..."
-        # Bandit supports JSON natively
+        # Create empty report first to prevent jq crashes if bandit fails to start
+        echo '{"results": []}' > bandit-report.json
         bandit -r . -lll -f json -o bandit-report.json || true
 
     - name: 📦 Run Pip-Audit (Dependency SCA)
@@ -46,7 +47,7 @@ runs:
         if [ -f "requirements.txt" ]; then
           pip-audit -r requirements.txt -f json -o audit-report.json || true
         else
-          echo "[]" > audit-report.json
+          echo '{"dependencies": []}' > audit-report.json
         fi
 
     - name: 🥒 Run Picklescan (AI Supply Chain)
@@ -55,47 +56,47 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       run: |
         echo "Running Picklescan..."
-        # FIX: Picklescan CLI does not output JSON. We save text output and grep it.
+        # Text output only - standard for current pip version
+        touch picklescan-report.txt
         picklescan -p . > picklescan-report.txt 2>&1 || true
 
     - name: 📊 Generate Consolidated Report
-      id: generate-report  # <--- FIX: ADDED THIS ID SO THE NEXT STEP WORKS
+      id: generate-report
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
         echo "### 🐍 Python AI Security Report" >> $GITHUB_STEP_SUMMARY
         FOUND_ISSUES=false
 
-        # --- 1. BANDIT REPORT ---
-        BANDIT_COUNT=$(jq '.results | length' bandit-report.json 2>/dev/null || echo "0")
-        if [ "$BANDIT_COUNT" -gt 0 ]; then
-          echo "#### 🛡️ Bandit Code Issues ($BANDIT_COUNT)" >> $GITHUB_STEP_SUMMARY
-          jq -r '.results[] | "| \(.issue_severity) | \(.issue_text) | \(.filename):\(.line_number) |"' bandit-report.json >> $GITHUB_STEP_SUMMARY
-          FOUND_ISSUES=true
-        else
-          echo "✅ **Bandit:** Clean." >> $GITHUB_STEP_SUMMARY
+        # 1. Bandit Results
+        if [ -f bandit-report.json ]; then
+          BANDIT_COUNT=$(jq '.results | length' bandit-report.json 2>/dev/null || echo "0")
+          if [ "$BANDIT_COUNT" -gt 0 ]; then
+            echo "#### 🛡️ Bandit Code Issues ($BANDIT_COUNT)" >> $GITHUB_STEP_SUMMARY
+            echo "| Severity | Issue | File:Line |" >> $GITHUB_STEP_SUMMARY
+            echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+            jq -r '.results[] | "| \(.issue_severity) | \(.issue_text) | \(.filename):\(.line_number) |"' bandit-report.json >> $GITHUB_STEP_SUMMARY
+            FOUND_ISSUES=true
+          else
+            echo "✅ **Bandit:** Clean." >> $GITHUB_STEP_SUMMARY
+          fi
         fi
 
-        # --- 2. PICKLESCAN REPORT ---
-        # FIX: Grep the text file for "dangerous" since JSON isn't available
+        # 2. Picklescan Results
         if grep -q "dangerous" picklescan-report.txt; then
            echo "#### 🥒 🛑 MALICIOUS MODEL DETECTED" >> $GITHUB_STEP_SUMMARY
-           echo "Dangerous globals found in pickle files. Check logs immediately." >> $GITHUB_STEP_SUMMARY
+           echo "Dangerous globals found in pickle files. **Critical supply chain risk.**" >> $GITHUB_STEP_SUMMARY
+           echo '```text' >> $GITHUB_STEP_SUMMARY
            cat picklescan-report.txt >> $GITHUB_STEP_SUMMARY
+           echo '```' >> $GITHUB_STEP_SUMMARY
            FOUND_ISSUES=true
         else
-           echo "✅ **Picklescan:** No dangerous globals found." >> $GITHUB_STEP_SUMMARY
+           echo "✅ **Picklescan:** All models safe." >> $GITHUB_STEP_SUMMARY
         fi
 
         echo "issues_found=$FOUND_ISSUES" >> $GITHUB_OUTPUT
 
-    - name: Fail Workflow
-      # FIX: Ensure logic checks outputs correctly
-      if: steps.generate-report.outputs.issues_found == 'true' && inputs.fail_on_detection == 'true'
-      shell: bash
-      run: exit 1
-
-    - name: 🚨 Report Python Security Vulnerabilities
+    - name: 🚨 Report Python Security Incident
       if: steps.generate-report.outputs.issues_found == 'true'
       uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
@@ -104,5 +105,12 @@ runs:
         finding_summary: "Vulnerabilities detected in Bandit SAST or Picklescan."
         details_file_path: "bandit-report.json"
         remediation_steps: |
-          1. **Picklescan:** Dangerous models detected. Do not deploy.
-          2. **Bandit:** Review the SAST report for hardcoded secrets/exec calls.
+          1. **Picklescan:** Do not load flagged models. Convert to `safetensors`.
+          2. **Bandit:** Review code for `exec()`, `eval()`, or hardcoded secrets.
+
+    - name: Fail Workflow Gate
+      if: steps.generate-report.outputs.issues_found == 'true' && inputs.fail_on_detection == 'true'
+      shell: bash
+      run: |
+        echo "::error::Python Security Gate Failed. Check the summary for details."
+        exit 1
