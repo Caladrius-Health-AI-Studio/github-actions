@@ -86,25 +86,19 @@ runs:
         echo "**Action Required:** Please rotate these credentials immediately and remove them from the history." >> issue_body.md
         cat issue_body.md >> $GITHUB_STEP_SUMMARY
 
-    - name: Create GitHub Issue
-      if: steps.gitleaks.outputs.secrets_found == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.GITHUB_TOKEN }}
-      run: |
-        EXISTING_ISSUE=$(gh issue list --label "gitleaks-detected" --state open --limit 1 --json number | jq '.[0].number')
-        
-        if [ "$EXISTING_ISSUE" != "null" ]; then
-          echo "An open security issue already exists (#$EXISTING_ISSUE). Adding a comment instead."
-          gh issue comment "$EXISTING_ISSUE" --body "⚠️ **New Scan Results:** Gitleaks detected secrets in the latest workflow run. Please verify context."
-        else
-          echo "Creating a new security issue..."
-          gh issue create \
-            --title "🚨 Security: Secrets Detected in Codebase" \
-            --body-file issue_body.md \
-            --label "gitleaks-detected" \
-            --assignee "${{ github.actor }}"
-        fi
+    - name: 🚨 Report Secret Leak
+      if: steps.gitleaks.outcome == 'failure'
+      uses: Caladrius-Health-AI-Studio/github-actions/report-security-issue@main
+      with:
+        scan_name: "Gitleaks Secret Detection"
+        severity: "CRITICAL"
+        finding_summary: "Hardcoded credentials (API Key, Token, or Password) detected in commit."
+        details_file_path: "gitleaks_summary.txt"
+        remediation_steps: |
+          1. **Revoke Immediately:** The leaked secret is now compromised. Rotate it in your AWS/GCP/Service console.
+          2. **Rewrite History:** You MUST use `git filter-repo` or BFG Repo-Cleaner to scrub the commit from history.
+          3. **Do Not Just Delete:** Adding a new commit that deletes the file keeps the secret in the git history.
+          4. **Reference:** [GitHub Docs on Removing Sensitive Data](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)
 
     - name: Fail Build
       if: steps.gitleaks.outputs.secrets_found == 'true' && inputs.fail-build == 'true'
