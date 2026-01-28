@@ -1,11 +1,7 @@
-name: 'PII Check'
-description: 'Scans commits for personally identifiable information (PII) using anchored pathing.'
+name: 'PII Scan'
+description: 'Scans commits for personally identifiable information (PII) - Indian Aadhaar, PAN, phone numbers, emails, API keys'
 
 inputs:
-  github_token:
-    description: 'GitHub token for creating issues'
-    required: true
-    default: '${{ github.token }}'
   fail_on_detection:
     description: 'Fail the workflow if PII is detected'
     required: false
@@ -14,15 +10,29 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: List files in the commit
-      id: list_files
+    - name: Scan for PII
+      id: scan_pii
       shell: bash
       run: |
+        REPORT_FILE="${{ github.workspace }}/violations_report.txt"
+        touch "$REPORT_FILE"
+        
+        FOUND_PII=false
+        TOTAL=0
+        
+        # PII Regex patterns
+        declare -A regex_patterns=(
+          ["PAN Card"]='\b[A-Z]{5}[0-9]{4}[A-Z]\b'
+          ["Aadhaar"]='\b[2-9][0-9]{3}[\s-]?[0-9]{4}[\s-]?[0-9]{4}\b'
+          ["Phone Number"]='\b(?:\+91|0|91)?[6-9][0-9]{9}\b'
+          ["Email"]='\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'
+          ["API Key"]='(api_key|apikey|api-key|secret_key|secretkey|secret-key|password|passwd|pwd).{0,5}[:=].{0,5}(["'\''])[0-9a-zA-Z_-]{16,}\2'
+        )
+        
+        # Exclude these file types from scanning
+        exclude_extensions=("yml" "yaml" "md" "json" "lock" "svg" "sum" "mod" "txt" "log")
+        
+        # Get changed files
         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           git fetch origin "$BASE_SHA" --depth=1
@@ -30,62 +40,53 @@ runs:
         else
           if [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
             BASE_SHA="${{ github.event.before }}"
+            git diff --name-status "$BASE_SHA" HEAD > files_changed.txt
           else
-            BASE_SHA="HEAD^"
+            git ls-files | awk '{print "A\t" $0}' > files_changed.txt
           fi
-          git diff --name-status "$BASE_SHA" HEAD > files_changed.txt || echo "A all_files" > files_changed.txt
         fi
-        [ ! -s files_changed.txt ] && git ls-files | awk '{print "A\t" $0}' > files_changed.txt
-
-    - name: Scan for sensitive information
-      id: scan_sensitive_info
-      shell: bash
-      run: |
-        # 1. ANCHOR THE REPORT FILE
-        REPORT_FILE="${{ github.workspace }}/violations_report.txt"
-        touch "$REPORT_FILE" 
         
-        FOUND_PII=false
-        TOTAL=0
-
-        declare -A regex_patterns=(
-          ["PAN"]='\b[A-Z]{5}[0-9]{4}[A-Z]\b'
-          ["Aadhaar"]='\b[2-9][0-9]{3}\s[0-9]{4}\s[0-9]{4}\b'
-          ["Phone Number"]='\b(?:\+91|0|91)?[6-9][0-9]{9}\b'
-          ["Email"]='\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'
-          ["API Key"]='(api_key|apikey|api-key).{0,20}(["'\''])[0-9a-zA-Z_-]{16,}\2'
-        )
-        exclude_extensions=("yml" "yaml" "env" "mod" "sum" "svg" "lock" "md" "json")
-
+        [[ ! -s files_changed.txt ]] && git ls-files | awk '{print "A\t" $0}' > files_changed.txt
+        
+        # Scan each file
         while IFS= read -r line; do
           status=$(echo "$line" | awk '{print $1}')
           file=$(echo "$line" | awk '{$1=""; print $0}' | sed 's/^[ \t]*//')
+          
+          # Handle renames
           [[ "$status" == R* ]] && file=$(echo "$file" | awk '{print $2}')
+          
+          # Skip deleted files or non-existent files
           [[ "$status" == "D" || ! -f "$file" ]] && continue
           
+          # Check if file extension should be excluded
           SKIP=false
-          for ext in "${exclude_extensions[@]}"; do [[ "$file" == *."$ext" ]] && SKIP=true; done
-          [[ "$file" == *"test-pii-data"* ]] && SKIP=false
-
+          for ext in "${exclude_extensions[@]}"; do
+            [[ "$file" == *."$ext" ]] && SKIP=true && break
+          done
+          
+          # Allow test data files (for testing PII detection)
+          [[ "$file" == *"test-pii-data"* || "$file" == *"test_pii"* ]] && SKIP=false
+          
           if [[ "$SKIP" == "false" ]]; then
             for info_type in "${!regex_patterns[@]}"; do
               pattern="${regex_patterns[$info_type]}"
-              # Use || true to prevent shell crash on no match
-              match=$(grep -nP "$pattern" "$file" | head -n 5 || true)
-              if [[ -n "$match" ]]; then
+              matches=$(grep -nP "$pattern" "$file" 2>/dev/null | head -n 10 || true)
+              
+              if [[ -n "$matches" ]]; then
                 FOUND_PII=true
-                while IFS= read -r line_match; do
-                  line_num=$(echo "$line_match" | cut -d: -f1)
+                while IFS= read -r match; do
+                  line_num=$(echo "$match" | cut -d: -f1)
                   echo "::error file=$file,line=$line_num,title=$info_type Detected::Sensitive data found"
                   echo "- **$info_type**: \`$file:$line_num\`" >> "$REPORT_FILE"
                   ((TOTAL++))
-                done <<< "$match"
+                done <<< "$matches"
               fi
             done
           fi
         done < files_changed.txt
-
-        echo "sensitive_info=$FOUND_PII" >> $GITHUB_OUTPUT
+        
+        echo "found_pii=$FOUND_PII" >> $GITHUB_OUTPUT
         echo "violation_count=$TOTAL" >> $GITHUB_OUTPUT
 
     - name: Write Summary Report
@@ -96,26 +97,17 @@ runs:
         echo "## 🔐 Sensitive Data Scan Summary" >> $GITHUB_STEP_SUMMARY
         
         if [[ -s "$REPORT_FILE" ]]; then
-            echo "### 🛑 Found PII violations" >> $GITHUB_STEP_SUMMARY
-            cat "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY
+          echo "### 🛑 Found ${{ steps.scan_pii.outputs.violation_count }} PII violation(s)" >> $GITHUB_STEP_SUMMARY
+          cat "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Action Required:** Remove sensitive data and scrub from Git history." >> $GITHUB_STEP_SUMMARY
         else
-            echo "✅ **No sensitive PII detected.**" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **No sensitive PII detected.**" >> $GITHUB_STEP_SUMMARY
         fi
 
-    - name: 🚨 Report PII Incident
-      if: steps.scan_sensitive_info.outputs.sensitive_info == 'true'
-      uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
-      with:
-        github_token: ${{ inputs.github_token }} 
-        scan_name: "PII Detection"
-        severity: "CRITICAL"
-        finding_summary: "${{ steps.scan_sensitive_info.outputs.violation_count }} PII instances detected."
-        details_file_path: "${{ github.workspace }}/violations_report.txt"
-        remediation_steps: |
-          1. Scrub data from history using `git filter-repo`.
-          2. Rotate any exposed credentials immediately.
-
     - name: Fail Workflow Gate
-      if: steps.scan_sensitive_info.outputs.sensitive_info == 'true' && inputs.fail_on_detection == 'true'
+      if: steps.scan_pii.outputs.found_pii == 'true' && inputs.fail_on_detection == 'true'
       shell: bash
-      run: exit 1
+      run: |
+        echo "::error::PII detected in commit. Build failed."
+        exit 1
