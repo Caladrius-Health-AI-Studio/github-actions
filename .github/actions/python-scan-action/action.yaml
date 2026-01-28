@@ -118,7 +118,7 @@ runs:
     - name: 🚨 Report Python Security Vulnerabilities
         # Run if issues_found is true
       if: steps.generate-report.outputs.issues_found == 'true'
-      uses: your-org/github-actions/report-security-issue@main
+      uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
         scan_name: "Python AI & Code Security"
         severity: "CRITICAL"
