@@ -1,0 +1,116 @@
+name: "Gitleaks Secret Scan"
+description: "Runs Gitleaks to scan for secrets and creates an Issue if found."
+inputs:
+  GITHUB_TOKEN:
+    description: 'GitHub token for creating issues and labels'
+    required: true
+    default: '${{ github.token }}'
+  fail-build:
+    description: "Fail if secrets are found"
+    required: false
+    default: "true"
+  GITLEAKS_LICENSE:
+    description: 'Gitleaks license key'
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Setup Gitleaks
+      shell: bash
+      run: |
+        # Install a recent version of gitleaks
+        GITLEAKS_VERSION="8.18.4"
+        echo "Installing Gitleaks v$GITLEAKS_VERSION..."
+        curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz
+        chmod +x gitleaks
+        sudo mv gitleaks /usr/local/bin/
+
+    - name: Create Gitleaks config
+      shell: bash
+      run: |
+        # Create a custom configuration file that excludes test directories
+        cat > gitleaks.toml << 'EOL'
+        [allowlist]
+        paths = [
+          '''.*test.*''',
+          '''.*tests.*''',
+          '''.*/__tests__/.*''',
+          '''.*/__test__/.*''',
+          '''.*/test/.*''',
+          '''.*/tests/.*''',
+        ]
+        EOL
+
+    - name: Run Gitleaks scan
+      id: gitleaks
+      shell: bash
+      env:
+        # Maps the input to the environment variable Gitleaks expects
+        GITLEAKS_LICENSE: ${{ inputs.GITLEAKS_LICENSE }}
+      run: |
+        echo "Starting scan..."
+        
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          echo "Scanning Pull Request range: ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          gitleaks detect --source="." --log-opts="${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" --verbose --report-format json --report-path gitleaks-report.json -c gitleaks.toml || true
+        else
+          echo "Scanning Push event (latest commit)"
+          gitleaks detect --source="." --verbose --report-format json --report-path gitleaks-report.json -c gitleaks.toml || true
+        fi
+
+        if [ -s "gitleaks-report.json" ] && [ "$(cat gitleaks-report.json)" != "[]" ]; then
+          echo "secrets_found=true" >> $GITHUB_OUTPUT
+          echo "::warning::Secrets detected!"
+        else
+          echo "secrets_found=false" >> $GITHUB_OUTPUT
+          echo "No secrets found."
+        fi
+
+    - name: Process scan results & Summary
+      if: steps.gitleaks.outputs.secrets_found == 'true'
+      shell: bash
+      run: |
+        echo "## 🛑 Security Alert: Secrets Detected" > issue_body.md
+        echo "" >> issue_body.md
+        echo "The Gitleaks scanner detected potential secrets in the following files:" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "| File | Secret Type | Commit |" >> issue_body.md
+        echo "| --- | --- | --- |" >> issue_body.md
+        jq -r '.[] | "| \(.File) | \(.RuleID) | \(.Commit) |"' gitleaks-report.json >> issue_body.md
+        echo "" >> issue_body.md
+        echo "**Action Required:** Please rotate these credentials immediately and remove them from the history." >> issue_body.md
+        cat issue_body.md >> $GITHUB_STEP_SUMMARY
+
+    - name: 🚨 Report Secret Leak
+      if: steps.gitleaks.outcome == 'failure'
+      uses: Caladrius-Health-AI-Studio/github-actions/report-security-issue@main
+      with:
+        scan_name: "Gitleaks Secret Detection"
+        severity: "CRITICAL"
+        finding_summary: "Hardcoded credentials (API Key, Token, or Password) detected in commit."
+        details_file_path: "gitleaks_summary.txt"
+        remediation_steps: |
+          1. **Revoke Immediately:** The leaked secret is now compromised. Rotate it in your AWS/GCP/Service console.
+          2. **Rewrite History:** You MUST use `git filter-repo` or BFG Repo-Cleaner to scrub the commit from history.
+          3. **Do Not Just Delete:** Adding a new commit that deletes the file keeps the secret in the git history.
+          4. **Reference:** [GitHub Docs on Removing Sensitive Data](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)
+
+    - name: Fail Build
+      if: steps.gitleaks.outputs.secrets_found == 'true' && inputs.fail-build == 'true'
+      shell: bash
+      run: exit 1
+
+    - name: Cleanup
+      if: always()
+      shell: bash
+      run: rm -f gitleaks-report.json gitleaks.toml issue_body.md
+
+outputs:
+  secrets_found:
+    description: "Whether secrets were found"
+    value: ${{ steps.gitleaks.outputs.secrets_found }}

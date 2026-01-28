@@ -1,0 +1,131 @@
+name: 'Non-Compliant Files Check'
+description: 'Scans commits for dangerous binaries, secrets, and large archives.'
+
+inputs:
+  github_token:
+    description: 'GitHub token'
+    required: true
+    default: '${{ github.token }}'
+  fail_on_detection:
+    description: 'Fail workflow if files are found'
+    required: false
+    default: 'true'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Get Changed Files
+      id: get_files
+      shell: bash
+      run: |
+        # standardized diff logic
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          git fetch origin "$BASE_SHA" --depth=1
+          git diff --name-only "$BASE_SHA" HEAD > files_changed.txt
+        else
+          if [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            BASE_SHA="${{ github.event.before }}"
+          else
+            BASE_SHA="HEAD^"
+          fi
+          git diff --name-only "$BASE_SHA" HEAD > files_changed.txt || git ls-files > files_changed.txt
+        fi
+
+    - name: Scan for Non-Compliant Files
+      id: scan
+      shell: bash
+      run: |
+        # 1. DEFINE RULES (Regex Strings)
+        # Binaries & Executables
+        EXT_BIN="exe|dll|bat|cmd|bin|msi|ps1|vbs|scr|class|jar|o|so|lib"
+        # Secrets & Keys (Critical for WASA)
+        EXT_SEC="pem|key|crt|cert|p12|pfx|env|config"
+        # Databases & Archives
+        EXT_DATA="db|sqlite|sql|mdb|accdb|iso|zip|tar|gz|rar|7z|dmg|vmdk|vdi"
+        # Media (Bloat)
+        EXT_MEDIA="mp3|mp4|wav|avi|mkv"
+
+        # Combine into one regex pattern: \.(exe|dll|...)$
+        FORBIDDEN_PATTERN="\.(($EXT_BIN)|($EXT_SEC)|($EXT_DATA)|($EXT_MEDIA))$"
+
+        # 2. DEFINE EXCLUSIONS
+        # Files that match the extension but are allowed
+        declare -a EXCLUDE_FILES=(
+          "example.env"
+          "package.json"
+          "package-lock.json"
+          "yarn.lock"
+        )
+
+        echo "Scanning files..."
+        FOUND_ISSUES=false
+        COUNT=0
+        rm -f non_compliant_report.txt
+
+        # 3. FAST SCANNING
+        while IFS= read -r file; do
+            # Skip if file was deleted
+            if [ ! -f "$file" ]; then continue; fi
+            
+            # Check exclusions first
+            SKIP=false
+            for exc in "${EXCLUDE_FILES[@]}"; do
+                if [[ "$file" == *"$exc" ]]; then SKIP=true; break; fi
+            done
+            if [[ "$SKIP" == "true" ]]; then continue; fi
+
+            # Regex Match (Case Insensitive)
+            if echo "$file" | grep -iEq "$FORBIDDEN_PATTERN"; then
+                echo "::warning file=$file,title=Non-Compliant File::File '$file' is not allowed in this repository."
+                echo "- $file" >> non_compliant_report.txt
+                FOUND_ISSUES=true
+                ((COUNT++))
+            fi
+        done < files_changed.txt
+
+        # 4. OUTPUTS
+        echo "found_issues=$FOUND_ISSUES" >> $GITHUB_OUTPUT
+        echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+    - name: Write Summary Report
+      if: always()
+      shell: bash
+      run: |
+        echo "## 🚫 Non-Compliant Files Report" >> $GITHUB_STEP_SUMMARY
+        COUNT="${{ steps.scan.outputs.count }}"
+        
+        if [[ "$COUNT" -gt 0 ]]; then
+            echo "### ⚠️ Found $COUNT dangerous or non-compliant files" >> $GITHUB_STEP_SUMMARY
+            echo "These files increase repository size or pose security risks. Please remove them:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat non_compliant_report.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+        else
+            echo "✅ **Repo is clean.** No forbidden file types detected." >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Fail Workflow
+      if: steps.scan.outputs.found_issues == 'true' && inputs.fail_on_detection == 'true'
+      shell: bash
+      run: |
+        echo "::error::Workflow failed. ${{ steps.scan.outputs.count }} non-compliant files found."
+        exit 1
+
+    - name: 🚨 Report Non-Compliant Files
+      if: steps.scan.outputs.found_issues == 'true'
+      uses: Caladrius-Health-AI-Studio/github-actions/report-security-issue@main
+      with:
+        scan_name: "Non-Compliant Files"
+        severity: "HIGH"
+        finding_summary: "${{ steps.scan.outputs.count }} forbidden files (binaries/secrets) detected."
+        details_file_path: "non_compliant_report.txt"
+        remediation_steps: |
+          1. **Remove Files:** Delete binaries (.exe, .dll) or large archives from the PR.
+          2. **Use .gitignore:** Add these file extensions to your `.gitignore` to prevent future commits.
+          3. **Artifact Storage:** If these are needed for tests, store them in S3/Drive and download them during the build, do not commit them.

@@ -1,0 +1,84 @@
+name: 'Report Security Issue'
+description: 'Standardized Issue Creator for Caladrius Health Security Pipeline'
+
+inputs:
+  github_token:
+    description: 'GitHub Token'
+    required: true
+    default: '${{ github.token }}'
+  scan_name:
+    description: 'Name of the scan (e.g., PII Check, Python Bandit)'
+    required: true
+  severity:
+    description: 'Severity Level (CRITICAL, HIGH, MEDIUM)'
+    required: true
+  finding_summary:
+    description: 'Short description of what was found'
+    required: true
+  details_file_path:
+    description: 'Path to the file containing the full list of errors (markdown/text)'
+    required: true
+  remediation_steps:
+    description: 'Specific advice on how to fix this class of error'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: 📝 Format Issue Body
+      shell: bash
+      run: |
+        # 1. Create a clean Issue Body template
+        cat <<EOF > security_issue_body.md
+        ## 🚨 Security Alert: ${{ inputs.scan_name }} Failed
+        
+        **Severity:** ${{ inputs.severity }}
+        **Status:** 🔴 Active
+        
+        ### 🔍 Description
+        The **${{ inputs.scan_name }}** pipeline detected violations that prevent merging.
+        
+        > **Summary:** ${{ inputs.finding_summary }}
+        
+        ### 📍 Where did it fail?
+        The following files/lines triggered this alert:
+        
+        EOF
+        
+        # 2. Append the specific findings (limited to top 20 lines to prevent spam)
+        echo "\`\`\`" >> security_issue_body.md
+        head -n 20 ${{ inputs.details_file_path }} >> security_issue_body.md
+        echo "\`\`\`" >> security_issue_body.md
+        
+        # 3. Append Remediation
+        cat <<EOF >> security_issue_body.md
+        
+        ---
+        ### 🛠️ Remediation
+        ${{ inputs.remediation_steps }}
+        
+        **Action Required:** Fix these issues and push a new commit to close this alert.
+        EOF
+
+    - name: 🚀 Create or Update Issue
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        TITLE: "[${{ inputs.severity }}] ${{ inputs.scan_name }}: ${{ inputs.finding_summary }}"
+        LABELS: "security,${{ inputs.severity }},${{ inputs.scan_name }}"
+      run: |
+        # Check for existing open issues with the same title to avoid duplicates
+        # We search for the unique Scan Name + Severity in the title
+        EXISTING_ISSUE=$(gh issue list --state open --search "${{ inputs.scan_name }} in:title" --json number --jq '.[0].number')
+
+        if [ -n "$EXISTING_ISSUE" ]; then
+          echo "⚠️ Updating existing issue #$EXISTING_ISSUE"
+          gh issue comment $EXISTING_ISSUE --body "🔄 **Recurrence:** The pipeline failed again with the same check. See latest workflow run for details."
+        else
+          echo "🚨 Creating new security issue..."
+          gh issue create \
+            --title "$TITLE" \
+            --body-file security_issue_body.md \
+            --label "$LABELS" \
+            --assignee "${{ github.actor }}"
+        fi
