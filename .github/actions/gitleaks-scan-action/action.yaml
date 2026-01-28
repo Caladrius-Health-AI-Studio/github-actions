@@ -88,6 +88,7 @@ runs:
       if: steps.gitleaks.outputs.secrets_found == 'true'
       uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
+        github_token: ${{ inputs.github_token }}  
         scan_name: "Gitleaks Secret Detection"
         severity: "CRITICAL"
         finding_summary: "Hardcoded credentials (API Key, Token, or Password) detected."
