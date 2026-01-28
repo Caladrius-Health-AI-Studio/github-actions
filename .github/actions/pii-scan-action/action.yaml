@@ -174,13 +174,15 @@ runs:
       run: |
         echo "## 🔐 Sensitive Data Scan Summary" >> $GITHUB_STEP_SUMMARY
         
+        # FIX: Default to '0' if the output is empty/null to prevent bash crash
         VIOLATION_COUNT="${{ steps.scan_sensitive_info.outputs.violation_count }}"
+        VIOLATION_COUNT=${VIOLATION_COUNT:-0} 
         
         if [[ "$VIOLATION_COUNT" -gt 0 ]]; then
             echo "### 🛑 Found $VIOLATION_COUNT violations" >> $GITHUB_STEP_SUMMARY
             echo "Please review the files below and rotate any exposed secrets immediately." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            cat violations_report.txt >> $GITHUB_STEP_SUMMARY
+            [ -f violations_report.txt ] && cat violations_report.txt >> $GITHUB_STEP_SUMMARY
         else
             echo "✅ **No sensitive PII or secrets detected.**" >> $GITHUB_STEP_SUMMARY
         fi
