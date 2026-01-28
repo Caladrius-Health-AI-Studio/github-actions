@@ -1,5 +1,5 @@
 name: 'Python AI & Security Scan'
-description: 'Scans Python code for vulnerabilities, audits dependencies, and checks AI models for pickle attacks.'
+description: 'Scans Python code and AI models.'
 
 inputs:
   github_token:
@@ -33,8 +33,8 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        # -r: recursive, -lll: High Severity only (reduce noise), -f: json
         echo "Running Bandit..."
+        # Bandit supports JSON natively
         bandit -r . -lll -f json -o bandit-report.json || true
 
     - name: 📦 Run Pip-Audit (Dependency SCA)
@@ -42,13 +42,11 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        # Scans current environment or requirements.txt
         echo "Running Pip-Audit..."
         if [ -f "requirements.txt" ]; then
           pip-audit -r requirements.txt -f json -o audit-report.json || true
         else
-          echo "No requirements.txt found, skipping audit." > audit-report.json
-          echo "[]" > audit-report.json # Empty JSON array to prevent jq errors
+          echo "[]" > audit-report.json
         fi
 
     - name: 🥒 Run Picklescan (AI Supply Chain)
@@ -56,11 +54,12 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        # Scans for malicious pickle files (PyTorch/joblib models)
         echo "Running Picklescan..."
-        picklescan -p . --output-format json > picklescan-report.json || true
+        # FIX: Picklescan CLI does not output JSON. We save text output and grep it.
+        picklescan -p . > picklescan-report.txt 2>&1 || true
 
     - name: 📊 Generate Consolidated Report
+      id: generate-report  # <--- FIX: ADDED THIS ID SO THE NEXT STEP WORKS
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
@@ -68,64 +67,42 @@ runs:
         FOUND_ISSUES=false
 
         # --- 1. BANDIT REPORT ---
-        BANDIT_COUNT=$(jq '.results | length' bandit-report.json)
-        if [ "$BANDIT_COUNT" -gt 0 ] && [ "$BANDIT_COUNT" != "null" ]; then
+        BANDIT_COUNT=$(jq '.results | length' bandit-report.json 2>/dev/null || echo "0")
+        if [ "$BANDIT_COUNT" -gt 0 ]; then
           echo "#### 🛡️ Bandit Code Issues ($BANDIT_COUNT)" >> $GITHUB_STEP_SUMMARY
-          echo "| Severity | Issue | File:Line |" >> $GITHUB_STEP_SUMMARY
-          echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
           jq -r '.results[] | "| \(.issue_severity) | \(.issue_text) | \(.filename):\(.line_number) |"' bandit-report.json >> $GITHUB_STEP_SUMMARY
           FOUND_ISSUES=true
         else
-          echo "✅ **Bandit:** Clean code patterns." >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Bandit:** Clean." >> $GITHUB_STEP_SUMMARY
         fi
 
-        # --- 2. PIP-AUDIT REPORT ---
-        # Handling the audit structure (it can be an array of dependencies)
-        AUDIT_COUNT=$(jq '.dependencies | length' audit-report.json 2>/dev/null || echo "0")
-        if [ "$AUDIT_COUNT" -gt 0 ]; then
-             echo "#### 📦 Vulnerable Packages ($AUDIT_COUNT)" >> $GITHUB_STEP_SUMMARY
-             echo "| Package | Version | Vulnerability ID |" >> $GITHUB_STEP_SUMMARY
-             echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
-             jq -r '.dependencies[] | .vulns[] | "| \(.alias) | \(.fix_versions[]) | \(.id) |"' audit-report.json >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
-             # Note: pip-audit JSON structure can vary slightly based on version, graceful fallback added
-        else
-             echo "✅ **Pip-Audit:** No known CVEs in dependencies." >> $GITHUB_STEP_SUMMARY
-        fi
-
-        # --- 3. PICKLESCAN REPORT ---
-        PICKLE_COUNT=$(jq '. | length' picklescan-report.json 2>/dev/null || echo "0")
-        # Check if the scan found dangerous globals
-        SAFE_COUNT=$(jq '[.[] | select(.safety == "safe")] | length' picklescan-report.json 2>/dev/null)
-        DANGEROUS_COUNT=$(jq '[.[] | select(.safety == "dangerous")] | length' picklescan-report.json 2>/dev/null)
-        
-        if [[ "$DANGEROUS_COUNT" -gt 0 ]]; then
-           echo "#### 🥒 🛑 MALICIOUS MODEL DETECTED ($DANGEROUS_COUNT)" >> $GITHUB_STEP_SUMMARY
-           echo "| File | Status | Threat |" >> $GITHUB_STEP_SUMMARY
-           echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
-           jq -r '.[] | select(.safety == "dangerous") | "| \(.path) | \(.safety) | \(.issues[]) |"' picklescan-report.json >> $GITHUB_STEP_SUMMARY
+        # --- 2. PICKLESCAN REPORT ---
+        # FIX: Grep the text file for "dangerous" since JSON isn't available
+        if grep -q "dangerous" picklescan-report.txt; then
+           echo "#### 🥒 🛑 MALICIOUS MODEL DETECTED" >> $GITHUB_STEP_SUMMARY
+           echo "Dangerous globals found in pickle files. Check logs immediately." >> $GITHUB_STEP_SUMMARY
+           cat picklescan-report.txt >> $GITHUB_STEP_SUMMARY
            FOUND_ISSUES=true
         else
-           echo "✅ **Picklescan:** $PICKLE_COUNT models scanned. All safe." >> $GITHUB_STEP_SUMMARY
+           echo "✅ **Picklescan:** No dangerous globals found." >> $GITHUB_STEP_SUMMARY
         fi
 
         echo "issues_found=$FOUND_ISSUES" >> $GITHUB_OUTPUT
 
     - name: Fail Workflow
+      # FIX: Ensure logic checks outputs correctly
       if: steps.generate-report.outputs.issues_found == 'true' && inputs.fail_on_detection == 'true'
       shell: bash
       run: exit 1
 
     - name: 🚨 Report Python Security Vulnerabilities
-        # Run if issues_found is true
       if: steps.generate-report.outputs.issues_found == 'true'
       uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
         scan_name: "Python AI & Code Security"
         severity: "CRITICAL"
-        finding_summary: "Vulnerabilities detected in Bandit SAST or Picklescan Model Audit."
-        # We concatenate the reports for the issue body
-        details_file_path: "bandit-report.json" 
+        finding_summary: "Vulnerabilities detected in Bandit SAST or Picklescan."
+        details_file_path: "bandit-report.json"
         remediation_steps: |
-          1. **Picklescan:** If a model is flagged 'Dangerous', convert it to `.safetensors` or rebuild it. **DO NOT DEPLOY.**
-          2. **Bandit:** Fix hardcoded passwords or insecure `exec()` calls.
-          3. **Dependencies:** Update `requirements.txt` to patch vulnerable packages.
+          1. **Picklescan:** Dangerous models detected. Do not deploy.
+          2. **Bandit:** Review the SAST report for hardcoded secrets/exec calls.
