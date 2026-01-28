@@ -1,106 +1,67 @@
-name: "Gitleaks Secret Scan"
-description: "Runs Gitleaks to scan for secrets and creates a summary/incident report if found."
+name: 'Gitleaks Secret Scan'
+description: 'Scans Git history for hardcoded secrets, API keys, tokens, and credentials'
 
 inputs:
-  GITHUB_TOKEN:
-    description: 'GitHub token'
-    required: true
-    default: '${{ github.token }}'
-  fail-build:
-    description: "Fail if secrets are found"
+  fail_on_detection:
+    description: 'Fail the workflow if secrets are detected'
     required: false
-    default: "true"
-  GITLEAKS_LICENSE:
-    description: 'Gitleaks license key'
-    required: false # Changed to false so open-source version doesn't crash if secret is missing
+    default: 'true'
 
 runs:
   using: "composite"
   steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Setup Gitleaks
+    - name: Install Gitleaks
       shell: bash
       run: |
-        GITLEAKS_VERSION="8.18.4"
-        echo "Installing Gitleaks v$GITLEAKS_VERSION..."
-        curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz
-        chmod +x gitleaks
+        wget -q https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz
+        tar -xzf gitleaks_8.18.2_linux_x64.tar.gz
         sudo mv gitleaks /usr/local/bin/
+        rm gitleaks_8.18.2_linux_x64.tar.gz
 
-    - name: Create Gitleaks config
+    - name: Run Gitleaks Scan
+      id: gitleaks_scan
       shell: bash
       run: |
-        cat > gitleaks.toml << 'EOL'
-        [allowlist]
-        paths = [
-          '''.*test.*''',
-          '''.*tests.*''',
-          '''.*/__tests__/.*''',
-          '''.*/__test__/.*''',
-          '''.*/test/.*''',
-          '''.*/tests/.*''',
-        ]
-        EOL
-
-    - name: Run Gitleaks scan
-      id: gitleaks
-      shell: bash
-      env:
-        GITLEAKS_LICENSE: ${{ inputs.GITLEAKS_LICENSE }}
-      run: |
-        echo "Starting scan..."
-        touch gitleaks-report.json
+        REPORT_FILE="${{ github.workspace }}/gitleaks-report.json"
         
-        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-          gitleaks detect --source="." --log-opts="${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" --verbose --report-format json --report-path gitleaks-report.json -c gitleaks.toml || true
+        # Run Gitleaks (exit code 1 = leaks found, but we catch it)
+        if gitleaks detect --source . --report-path "$REPORT_FILE" --report-format json --verbose; then
+          echo "found_secrets=false" >> $GITHUB_OUTPUT
+          echo "secret_count=0" >> $GITHUB_OUTPUT
+          # Create empty report if none exists
+          echo '{"results":[]}' > "$REPORT_FILE"
         else
-          gitleaks detect --source="." --verbose --report-format json --report-path gitleaks-report.json -c gitleaks.toml || true
-        fi
-
-        # Check if report has content and isn't just an empty JSON array
-        if [ -s "gitleaks-report.json" ] && [ "$(cat gitleaks-report.json)" != "[]" ]; then
-          echo "secrets_found=true" >> $GITHUB_OUTPUT
-          # Create a text-only summary for the incident report step
-          jq -r '.[] | "File: \(.File) | Rule: \(.RuleID) | Commit: \(.Commit)"' gitleaks-report.json > gitleaks_summary.txt
-        else
-          echo "secrets_found=false" >> $GITHUB_OUTPUT
+          # Secrets found
+          SECRET_COUNT=$(jq '.[] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          echo "found_secrets=true" >> $GITHUB_OUTPUT
+          echo "secret_count=$SECRET_COUNT" >> $GITHUB_OUTPUT
+          
+          # Add GitHub annotations
+          jq -r '.[] | "::error file=\(.File),line=\(.StartLine),title=Secret Detected::\(.Description) - \(.RuleID)"' "$REPORT_FILE" || true
         fi
 
     - name: Write Summary Report
       if: always()
       shell: bash
       run: |
+        REPORT_FILE="${{ github.workspace }}/gitleaks-report.json"
         echo "## 🔑 Gitleaks Secret Scan Summary" >> $GITHUB_STEP_SUMMARY
-        if [[ "${{ steps.gitleaks.outputs.secrets_found }}" == "true" ]]; then
-          echo "### 🛑 CRITICAL: Hardcoded Secrets Detected" >> $GITHUB_STEP_SUMMARY
-          echo "| File | Secret Type | Commit |" >> $GITHUB_STEP_SUMMARY
-          echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
-          jq -r '.[] | "| \(.File) | \(.RuleID) | \(.Commit) |"' gitleaks-report.json >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ steps.gitleaks_scan.outputs.found_secrets }}" == "true" ]]; then
+          echo "### 🛑 Found ${{ steps.gitleaks_scan.outputs.secret_count }} secret(s)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Line | Secret Type | Commit |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
+          jq -r '.[] | "| \(.File) | \(.StartLine) | \(.RuleID) | \(.Commit[:7]) |"' "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY || true
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Action Required:** Rotate exposed secrets immediately and scrub from Git history." >> $GITHUB_STEP_SUMMARY
         else
           echo "✅ **No secrets detected.**" >> $GITHUB_STEP_SUMMARY
         fi
 
-    - name: 🚨 Report Secret Leak Incident
-      if: steps.gitleaks.outputs.secrets_found == 'true'
-      uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
-      with:
-        github_token: ${{ inputs.github_token }}  
-        scan_name: "Gitleaks Secret Detection"
-        severity: "CRITICAL"
-        finding_summary: "Hardcoded credentials (API Key, Token, or Password) detected."
-        details_file_path: "gitleaks_summary.txt"
-        remediation_steps: |
-          1. **Revoke Immediately:** The leaked secret is compromised. Rotate it.
-          2. **Rewrite History:** Use `git filter-repo` to scrub the secret from history.
-          3. **Do Not Just Delete:** A deletion commit leaves the secret in the Git history logs.
-
-    - name: Fail Build Gate
-      if: steps.gitleaks.outputs.secrets_found == 'true' && inputs.fail-build == 'true'
+    - name: Fail Workflow Gate
+      if: steps.gitleaks_scan.outputs.found_secrets == 'true' && inputs.fail_on_detection == 'true'
       shell: bash
       run: |
-        echo "::error::Secret Scan Failed. Please rotate credentials and scrub history."
+        echo "::error::Secrets detected in Git history. Build failed."
         exit 1
