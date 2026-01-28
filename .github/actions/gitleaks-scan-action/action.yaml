@@ -88,7 +88,7 @@ runs:
 
     - name: 🚨 Report Secret Leak
       if: steps.gitleaks.outcome == 'failure'
-      uses: Caladrius-Health-AI-Studio/github-actions/report-security-issue@main
+      uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
         scan_name: "Gitleaks Secret Detection"
         severity: "CRITICAL"
