@@ -106,6 +106,7 @@ runs:
       if: steps.scan_sensitive_info.outputs.sensitive_info == 'true'
       uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
+        github_token: ${{ inputs.github_token }} 
         scan_name: "PII Detection"
         severity: "CRITICAL"
         finding_summary: "${{ steps.scan_sensitive_info.outputs.violation_count }} PII instances detected."
