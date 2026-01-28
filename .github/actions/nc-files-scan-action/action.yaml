@@ -116,3 +116,16 @@ runs:
       run: |
         echo "::error::Workflow failed. ${{ steps.scan.outputs.count }} non-compliant files found."
         exit 1
+
+    - name: 🚨 Report Non-Compliant Files
+      if: steps.scan.outputs.found_issues == 'true'
+      uses: Caladrius-Health-AI-Studio/github-actions/report-security-issue@main
+      with:
+        scan_name: "Non-Compliant Files"
+        severity: "HIGH"
+        finding_summary: "${{ steps.scan.outputs.count }} forbidden files (binaries/secrets) detected."
+        details_file_path: "non_compliant_report.txt"
+        remediation_steps: |
+          1. **Remove Files:** Delete binaries (.exe, .dll) or large archives from the PR.
+          2. **Use .gitignore:** Add these file extensions to your `.gitignore` to prevent future commits.
+          3. **Artifact Storage:** If these are needed for tests, store them in S3/Drive and download them during the build, do not commit them.
