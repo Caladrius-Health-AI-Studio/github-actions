@@ -100,6 +100,7 @@ runs:
       if: steps.generate-report.outputs.issues_found == 'true'
       uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
+        github_token: ${{ inputs.github_token }}
         scan_name: "Python AI & Code Security"
         severity: "CRITICAL"
         finding_summary: "Vulnerabilities detected in Bandit SAST or Picklescan."
