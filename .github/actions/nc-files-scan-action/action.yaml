@@ -1,116 +1,83 @@
-name: 'Non-Compliant Files Check'
-description: 'Scans commits for dangerous binaries, secrets, and large archives.'
+name: 'Non-Compliant Files Scan'
+description: 'Scans for forbidden file types in Caladrius repos (executables, binaries, archives, etc.)'
 
 inputs:
-  github_token:
-    description: 'GitHub token'
-    required: true
-    default: '${{ github.token }}'
   fail_on_detection:
-    description: 'Fail workflow if files are found'
+    description: 'Fail the workflow if forbidden files are detected'
     required: false
     default: 'true'
 
 runs:
   using: "composite"
   steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Get Changed Files
-      id: get_files
+    - name: Scan for Non-Compliant Files
+      id: scan_files
       shell: bash
       run: |
+        REPORT_FILE="${{ github.workspace }}/non_compliant_report.txt"
+        touch "$REPORT_FILE"
+        
+        FOUND_NC=false
+        TOTAL=0
+        
+        # Forbidden extensions
+        FORBIDDEN_EXTS=("exe" "dll" "so" "dylib" "bin" "o" "a" "lib" "zip" "tar" "gz" "rar" "7z" "dmg" "pkg" "deb" "rpm")
+        
+        # Get changed files (PR or Push)
         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           git fetch origin "$BASE_SHA" --depth=1
-          git diff --name-only "$BASE_SHA" HEAD > files_changed.txt
+          FILES=$(git diff --name-only --diff-filter=ACM "$BASE_SHA" HEAD)
         else
           if [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
-            BASE_SHA="${{ github.event.before }}"
+            FILES=$(git diff --name-only --diff-filter=ACM "${{ github.event.before }}" HEAD)
           else
-            BASE_SHA="HEAD^"
+            FILES=$(git ls-files)
           fi
-          git diff --name-only "$BASE_SHA" HEAD > files_changed.txt || git ls-files > files_changed.txt
         fi
-
-    - name: Scan for Non-Compliant Files
-      id: scan
-      shell: bash
-      run: |
-        # 1. RULES
-        EXT_BIN="exe|dll|bat|cmd|bin|msi|ps1|vbs|scr|class|jar|o|so|lib"
-        EXT_SEC="pem|key|crt|cert|p12|pfx|env|config"
-        EXT_DATA="db|sqlite|sql|mdb|accdb|iso|zip|tar|gz|rar|7z|dmg|vmdk|vdi"
-        EXT_MEDIA="mp3|mp4|wav|avi|mkv"
-        FORBIDDEN_PATTERN="\.(($EXT_BIN)|($EXT_SEC)|($EXT_DATA)|($EXT_MEDIA))$"
-
-        # 2. EXCLUSIONS
-        declare -a EXCLUDE_FILES=("example.env" "package.json" "package-lock.json" "yarn.lock")
-
-        FOUND_ISSUES="false"
-        COUNT=0
-        touch non_compliant_report.txt
-
-        # 3. SCANNING
+        
+        # Scan each file
         while IFS= read -r file; do
-            if [ ! -f "$file" ]; then continue; fi
-            
-            SKIP=false
-            for exc in "${EXCLUDE_FILES[@]}"; do
-                if [[ "$file" == *"$exc" ]]; then SKIP=true; break; fi
-            done
-            if [[ "$SKIP" == "true" ]]; then continue; fi
-
-            if echo "$file" | grep -iEq "$FORBIDDEN_PATTERN"; then
-                # Annotations show up in the "Files Changed" tab
-                echo "::error file=$file,title=Non-Compliant File Detected::File '$file' is restricted in Caladrius repos."
-                echo "- $file" >> non_compliant_report.txt
-                FOUND_ISSUES="true"
-                ((COUNT++))
+          [[ -z "$file" ]] && continue
+          [[ ! -f "$file" ]] && continue
+          
+          filename=$(basename "$file")
+          extension="${filename##*.}"
+          
+          # Check if extension is forbidden
+          for forbidden in "${FORBIDDEN_EXTS[@]}"; do
+            if [[ "$extension" == "$forbidden" ]]; then
+              FOUND_NC=true
+              echo "::error file=$file,line=0,title=Non-Compliant File Detected::File '$filename' is restricted in Caladrius repos."
+              echo "- **$filename** (\`$file\`) - Extension: .$extension" >> "$REPORT_FILE"
+              ((TOTAL++))
+              break
             fi
-        done < files_changed.txt
-
-        # 4. OUTPUTS (No exit 1 here!)
-        echo "found_issues=$FOUND_ISSUES" >> $GITHUB_OUTPUT
-        echo "count=$COUNT" >> $GITHUB_OUTPUT
+          done
+        done <<< "$FILES"
+        
+        echo "found_nc=$FOUND_NC" >> $GITHUB_OUTPUT
+        echo "violation_count=$TOTAL" >> $GITHUB_OUTPUT
 
     - name: Write Summary Report
       if: always()
       shell: bash
       run: |
+        REPORT_FILE="${{ github.workspace }}/non_compliant_report.txt"
         echo "## 🚫 Non-Compliant Files Report" >> $GITHUB_STEP_SUMMARY
-        COUNT="${{ steps.scan.outputs.count }}"
-        COUNT=${COUNT:-0}
         
-        if [[ "$COUNT" -gt 0 ]]; then
-            echo "### 🛑 Found $COUNT forbidden files" >> $GITHUB_STEP_SUMMARY
-            echo "These files must be removed before merging to 'dev':" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            cat non_compliant_report.txt >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
+        if [[ -s "$REPORT_FILE" ]]; then
+          echo "### 🛑 Found ${{ steps.scan_files.outputs.violation_count }} forbidden file(s)" >> $GITHUB_STEP_SUMMARY
+          cat "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Action Required:** Remove these files before merging." >> $GITHUB_STEP_SUMMARY
         else
-            echo "✅ **Repo is clean.** No forbidden file types detected." >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Repo is clean. No forbidden file types detected.**" >> $GITHUB_STEP_SUMMARY
         fi
 
-    - name: 🚨 Report Non-Compliant Files Incident
-      if: steps.scan.outputs.found_issues == 'true'
-      uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
-      with:
-        github_token: ${{ inputs.github_token }} 
-        scan_name: "Non-Compliant Files"
-        severity: "HIGH"
-        finding_summary: "${{ steps.scan.outputs.count }} forbidden files detected."
-        details_file_path: "non_compliant_report.txt"
-        remediation_steps: |
-          1. Delete the binaries/archives from the PR.
-          2. Use .gitignore to block these extensions permanently.
-
     - name: Fail Workflow Gate
-      if: steps.scan.outputs.found_issues == 'true' && inputs.fail_on_detection == 'true'
+      if: steps.scan_files.outputs.found_nc == 'true' && inputs.fail_on_detection == 'true'
       shell: bash
       run: |
-        echo "::error::Hygiene Gate Failed: Non-compliant files detected."
+        echo "::error::Non-compliant files detected. Build failed."
         exit 1
