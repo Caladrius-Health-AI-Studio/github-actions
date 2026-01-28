@@ -195,7 +195,7 @@ runs:
     - name: 🚨 Report PII Incident
       # Only run if PII was found
       if: steps.scan_sensitive_info.outputs.sensitive_info == 'true'
-      uses: Caladrius-Health-AI-Studio/github-actions/report-security-issue@main
+      uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
         scan_name: "PII Detection"
         severity: "CRITICAL"
