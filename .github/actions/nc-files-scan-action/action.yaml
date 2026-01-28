@@ -99,6 +99,7 @@ runs:
       if: steps.scan.outputs.found_issues == 'true'
       uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
+        github_token: ${{ inputs.github_token }} 
         scan_name: "Non-Compliant Files"
         severity: "HIGH"
         finding_summary: "${{ steps.scan.outputs.count }} forbidden files detected."
