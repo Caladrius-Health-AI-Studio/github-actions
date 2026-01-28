@@ -91,7 +91,7 @@ runs:
     - name: 🚨 Report Web Security Vulnerabilities
         # Run if Semgrep found issues
       if: steps.semgrep.outputs.found_issues == 'true'
-      uses: Caladrius-Health-AI-Studio/github-actions/report-security-issue@main
+      uses: Caladrius-Health-AI-Studio/github-actions/.github/actions/report-security-issue@main
       with:
         scan_name: "Web Security (React/Node)"
         severity: "HIGH"
