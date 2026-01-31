@@ -1,0 +1,162 @@
+name: 'Trivy SCA Scan'
+description: 'Scans project dependencies for known CVEs using Trivy (npm, Python, etc.)'
+
+inputs:
+  github_token:
+    description: 'GitHub token for creating issues'
+    required: true
+  fail_on_severity:
+    description: 'Fail build on vulnerabilities at or above this severity (CRITICAL, HIGH, MEDIUM, LOW)'
+    required: false
+    default: 'HIGH'
+  scan_type:
+    description: 'Type of scan: fs (filesystem) or image (container image)'
+    required: false
+    default: 'fs'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Trivy
+      shell: bash
+      run: |
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy -y
+
+    - name: Run Trivy SCA Scan
+      id: trivy_scan
+      shell: bash
+      run: |
+        REPORT_FILE="${{ github.workspace }}/trivy-report.json"
+        
+        # Run Trivy filesystem scan
+        trivy fs \
+          --scanners vuln \
+          --format json \
+          --output "$REPORT_FILE" \
+          --severity CRITICAL,HIGH,MEDIUM,LOW \
+          . || true
+        
+        # Parse results by severity
+        if [[ -f "$REPORT_FILE" ]]; then
+          CRITICAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          HIGH_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          MEDIUM_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          LOW_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          TOTAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          
+          echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+          echo "high_count=$HIGH_COUNT" >> $GITHUB_OUTPUT
+          echo "medium_count=$MEDIUM_COUNT" >> $GITHUB_OUTPUT
+          echo "low_count=$LOW_COUNT" >> $GITHUB_OUTPUT
+          echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
+        else
+          echo "critical_count=0" >> $GITHUB_OUTPUT
+          echo "high_count=0" >> $GITHUB_OUTPUT
+          echo "medium_count=0" >> $GITHUB_OUTPUT
+          echo "low_count=0" >> $GITHUB_OUTPUT
+          echo "total_count=0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Generate Summary Report
+      if: always()
+      shell: bash
+      run: |
+        REPORT_FILE="${{ github.workspace }}/trivy-report.json"
+        
+        echo "## 🔍 Trivy SCA Vulnerability Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Total Vulnerabilities:** ${{ steps.trivy_scan.outputs.total_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 🔴 CRITICAL: ${{ steps.trivy_scan.outputs.critical_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 🟠 HIGH: ${{ steps.trivy_scan.outputs.high_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 🟡 MEDIUM: ${{ steps.trivy_scan.outputs.medium_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 🟢 LOW: ${{ steps.trivy_scan.outputs.low_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ steps.trivy_scan.outputs.total_count }}" -gt 0 ]]; then
+          echo "### 📦 Vulnerable Dependencies" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Package | Vulnerability | Installed | Fixed In |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- | --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
+          
+          jq -r '.Results[]? | select(.Vulnerabilities) | .Target as $target | 
+            .Vulnerabilities[] | select(.Severity == "CRITICAL" or .Severity == "HIGH") | 
+            "| \(.Severity) | \(.PkgName) | \(.VulnerabilityID) | \(.InstalledVersion) | \(.FixedVersion // "N/A") |"' \
+            "$REPORT_FILE" | head -n 30 >> $GITHUB_STEP_SUMMARY || true
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Showing top 30 CRITICAL/HIGH vulnerabilities. See full report in artifacts._" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✅ **No vulnerabilities detected in dependencies!**" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Create GitHub Issue (HIGH/CRITICAL Only)
+      if: |
+        steps.trivy_scan.outputs.critical_count > 0 || 
+        steps.trivy_scan.outputs.high_count > 0
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        CRITICAL_COUNT="${{ steps.trivy_scan.outputs.critical_count }}"
+        HIGH_COUNT="${{ steps.trivy_scan.outputs.high_count }}"
+        TOTAL_COUNT="${{ steps.trivy_scan.outputs.total_count }}"
+        
+        echo "## 🚨 Trivy SCA Alert - Vulnerable Dependencies Detected" > issue_body.md
+        echo "" >> issue_body.md
+        echo "**Scan:** Software Composition Analysis (Trivy)" >> issue_body.md
+        echo "**Severity:** HIGH/CRITICAL" >> issue_body.md
+        echo "**Triggered by:** ${{ github.event_name }} on ${{ github.ref_name }}" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "### 🔍 Vulnerability Summary" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "- **CRITICAL:** $CRITICAL_COUNT" >> issue_body.md
+        echo "- **HIGH:** $HIGH_COUNT" >> issue_body.md
+        echo "- **Total Vulnerabilities:** $TOTAL_COUNT" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "### 📦 Critical & High Severity Vulnerabilities" >> issue_body.md
+        echo "" >> issue_body.md
+        echo '```' >> issue_body.md
+        jq -r '.Results[]? | select(.Vulnerabilities) | .Target as $target | 
+          .Vulnerabilities[] | select(.Severity == "CRITICAL" or .Severity == "HIGH") | 
+          "\(.Severity) - \(.PkgName) (\(.InstalledVersion))\n  CVE: \(.VulnerabilityID)\n  Fixed in: \(.FixedVersion // "No fix available")\n  File: \($target)\n"' \
+          trivy-report.json | head -n 100 >> issue_body.md
+        echo '```' >> issue_body.md
+        echo "" >> issue_body.md
+        echo "---" >> issue_body.md
+        echo "### 🛠️ Remediation Steps" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "1. **Update vulnerable packages** to fixed versions (if available)" >> issue_body.md
+        echo "2. **Review Python dependencies:** Check \`requirements_docker.txt\`" >> issue_body.md
+        echo "3. **Review Node.js dependencies:** Check \`package.json\` and \`package-lock.json\`" >> issue_body.md
+        echo "4. **Run npm audit / pip-audit** locally to see detailed remediation steps" >> issue_body.md
+        echo "5. **If no fix available:** Consider alternative packages or apply workarounds" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> issue_body.md
+        
+        # Check for existing open issue
+        EXISTING_ISSUE=$(gh issue list --state open --search "Trivy SCA Alert in:title" --json number --jq '.[0].number' || true)
+        
+        if [[ -n "$EXISTING_ISSUE" ]]; then
+          echo "⚠️ Updating existing issue #$EXISTING_ISSUE"
+          gh issue comment "$EXISTING_ISSUE" --body "🔄 **Recurrence detected** in workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        else
+          echo "🚨 Creating new security issue"
+          gh issue create \
+            --title "[HIGH/CRITICAL] Trivy SCA Alert - $CRITICAL_COUNT CRITICAL, $HIGH_COUNT HIGH CVEs" \
+            --body-file issue_body.md \
+            --label "security,dependencies,sca,high-severity" \
+            --assignee "${{ github.actor }}"
+        fi
+
+    - name: Fail Workflow Gate
+      if: |
+        (inputs.fail_on_severity == 'CRITICAL' && steps.trivy_scan.outputs.critical_count > 0) ||
+        (inputs.fail_on_severity == 'HIGH' && (steps.trivy_scan.outputs.critical_count > 0 || steps.trivy_scan.outputs.high_count > 0)) ||
+        (inputs.fail_on_severity == 'MEDIUM' && (steps.trivy_scan.outputs.critical_count > 0 || steps.trivy_scan.outputs.high_count > 0 || steps.trivy_scan.outputs.medium_count > 0))
+      shell: bash
+      run: |
+        echo "::error::Trivy detected vulnerabilities at or above ${{ inputs.fail_on_severity }} severity. Build failed."
+        exit 1

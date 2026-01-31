@@ -1,0 +1,267 @@
+name: 'OWASP ZAP DAST Scan'
+description: 'Dynamic Application Security Testing with OWASP ZAP via Tailscale'
+
+inputs:
+  github_token:
+    description: 'GitHub token for creating issues'
+    required: true
+  tailscale_auth_key:
+    description: 'Tailscale authentication key'
+    required: true
+  target_url:
+    description: 'Target URL to scan (e.g., http://100.105.177.39:3000)'
+    required: true
+  scan_type:
+    description: 'Scan type: baseline or full'
+    required: false
+    default: 'baseline'
+  fail_on_severity:
+    description: 'Fail build on alerts at or above this severity (HIGH, MEDIUM, LOW)'
+    required: false
+    default: 'HIGH'
+  auth_username:
+    description: 'Username for authentication (optional)'
+    required: false
+    default: ''
+  auth_password:
+    description: 'Password for authentication (optional)'
+    required: false
+    default: ''
+  auth_login_url:
+    description: 'Login URL for authentication (optional)'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Tailscale
+      uses: tailscale/github-action@v2
+      with:
+        oauth-client-id: ${{ inputs.tailscale_auth_key }}
+        oauth-secret: ${{ inputs.tailscale_auth_key }}
+        tags: tag:ci
+
+    - name: Verify Tailscale Connection
+      shell: bash
+      run: |
+        echo "🔗 Connected to Tailscale network"
+        tailscale status
+        
+        # Extract target host from URL
+        TARGET_HOST=$(echo "${{ inputs.target_url }}" | sed -E 's|https?://([^:/]+).*|\1|')
+        
+        # Test connectivity
+        if ping -c 3 "$TARGET_HOST" > /dev/null 2>&1; then
+          echo "✅ Target host $TARGET_HOST is reachable"
+        else
+          echo "⚠️ Warning: Cannot ping $TARGET_HOST (might still be accessible via HTTP)"
+        fi
+
+    - name: Install OWASP ZAP
+      shell: bash
+      run: |
+        # Install ZAP
+        wget -q https://github.com/zaproxy/zaproxy/releases/download/v2.14.0/ZAP_2.14.0_Linux.tar.gz
+        tar -xzf ZAP_2.14.0_Linux.tar.gz
+        sudo mv ZAP_2.14.0 /opt/zap
+        sudo ln -s /opt/zap/zap.sh /usr/local/bin/zap.sh
+
+    - name: Create ZAP Authentication Script
+      if: inputs.auth_username != '' && inputs.auth_password != ''
+      shell: bash
+      run: |
+        cat > zap-auth.js << 'AUTHEOF'
+          // ZAP Authentication Script
+          function authenticate(helper, paramsValues, credentials) {
+              var loginUrl = paramsValues.get("loginUrl");
+              var username = credentials.getParam("username");
+              var password = credentials.getParam("password");
+              
+              var msg = helper.prepareMessage();
+              msg.setRequestHeader("POST " + loginUrl + " HTTP/1.1\r\n" +
+                                   "Host: " + helper.getURI(loginUrl).getHost() + "\r\n" +
+                                   "Content-Type: application/json\r\n");
+              
+              var requestBody = JSON.stringify({
+                  email: username,
+                  password: password
+              });
+              
+              msg.setRequestBody(requestBody);
+              helper.sendAndReceive(msg);
+              
+              return msg;
+          }
+          
+          function getRequiredParamsNames() {
+              return ["loginUrl"];
+          }
+          
+          function getCredentialsParamsNames() {
+              return ["username", "password"];
+          }
+          AUTHEOF
+
+    - name: Run ZAP Scan
+      id: zap_scan
+      shell: bash
+      run: |
+        REPORT_FILE="${{ github.workspace }}/zap-report.json"
+        HTML_REPORT="${{ github.workspace }}/zap-report.html"
+        
+        TARGET_URL="${{ inputs.target_url }}"
+        
+        # Build ZAP command based on scan type
+        if [[ "${{ inputs.scan_type }}" == "full" ]]; then
+          echo "🔍 Running FULL ZAP scan (this may take 15-30 minutes)..."
+          /opt/zap/zap.sh -cmd \
+            -quickurl "$TARGET_URL" \
+            -quickprogress \
+            -quickout "$REPORT_FILE" || true
+        else
+          echo "🔍 Running BASELINE ZAP scan (quick check)..."
+          docker run --rm \
+            --network host \
+            -v $(pwd):/zap/wrk/:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t "$TARGET_URL" \
+            -J zap-report.json \
+            -r zap-report.html || true
+        fi
+        
+        # Parse results
+        if [[ -f "$REPORT_FILE" ]]; then
+          HIGH_COUNT=$(jq '[.site[]?.alerts[]? | select(.riskcode == "3")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          MEDIUM_COUNT=$(jq '[.site[]?.alerts[]? | select(.riskcode == "2")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          LOW_COUNT=$(jq '[.site[]?.alerts[]? | select(.riskcode == "1")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          INFO_COUNT=$(jq '[.site[]?.alerts[]? | select(.riskcode == "0")] | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          TOTAL_COUNT=$((HIGH_COUNT + MEDIUM_COUNT + LOW_COUNT + INFO_COUNT))
+          
+          echo "high_count=$HIGH_COUNT" >> $GITHUB_OUTPUT
+          echo "medium_count=$MEDIUM_COUNT" >> $GITHUB_OUTPUT
+          echo "low_count=$LOW_COUNT" >> $GITHUB_OUTPUT
+          echo "info_count=$INFO_COUNT" >> $GITHUB_OUTPUT
+          echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
+        else
+          echo "high_count=0" >> $GITHUB_OUTPUT
+          echo "medium_count=0" >> $GITHUB_OUTPUT
+          echo "low_count=0" >> $GITHUB_OUTPUT
+          echo "info_count=0" >> $GITHUB_OUTPUT
+          echo "total_count=0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Generate Summary Report
+      if: always()
+      shell: bash
+      run: |
+        REPORT_FILE="${{ github.workspace }}/zap-report.json"
+        
+        echo "## 🌐 OWASP ZAP DAST Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Target:** ${{ inputs.target_url }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Scan Type:** ${{ inputs.scan_type }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔍 Security Alerts" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Total Alerts:** ${{ steps.zap_scan.outputs.total_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 🔴 HIGH: ${{ steps.zap_scan.outputs.high_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 🟠 MEDIUM: ${{ steps.zap_scan.outputs.medium_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 🟡 LOW: ${{ steps.zap_scan.outputs.low_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 🔵 INFO: ${{ steps.zap_scan.outputs.info_count }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ steps.zap_scan.outputs.total_count }}" -gt 0 ]]; then
+          echo "### ⚠️ High Risk Findings" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Risk | Alert | URL | CWE |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
+          
+          jq -r '.site[]?.alerts[]? | select(.riskcode == "3") | 
+            "| HIGH | \(.name) | \(.url // "N/A") | \(.cweid // "N/A") |"' \
+            "$REPORT_FILE" | head -n 20 >> $GITHUB_STEP_SUMMARY || true
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Showing top 20 HIGH risk alerts. See full report in artifacts._" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✅ **No security vulnerabilities detected!**" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Create GitHub Issue (HIGH Severity Only)
+      if: steps.zap_scan.outputs.high_count > 0
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        HIGH_COUNT="${{ steps.zap_scan.outputs.high_count }}"
+        MEDIUM_COUNT="${{ steps.zap_scan.outputs.medium_count }}"
+        TOTAL_COUNT="${{ steps.zap_scan.outputs.total_count }}"
+        
+        echo "## 🚨 OWASP ZAP DAST Alert - Security Vulnerabilities Detected" > issue_body.md
+        echo "" >> issue_body.md
+        echo "**Scan:** Dynamic Application Security Testing (OWASP ZAP)" >> issue_body.md
+        echo "**Severity:** HIGH" >> issue_body.md
+        echo "**Target:** ${{ inputs.target_url }}" >> issue_body.md
+        echo "**Scan Type:** ${{ inputs.scan_type }}" >> issue_body.md
+        echo "**Triggered by:** ${{ github.event_name }} on ${{ github.ref_name }}" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "### 🔍 Alert Summary" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "- **HIGH:** $HIGH_COUNT" >> issue_body.md
+        echo "- **MEDIUM:** $MEDIUM_COUNT" >> issue_body.md
+        echo "- **Total Alerts:** $TOTAL_COUNT" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "### 🔴 High Risk Vulnerabilities" >> issue_body.md
+        echo "" >> issue_body.md
+        echo '```' >> issue_body.md
+        jq -r '.site[]?.alerts[]? | select(.riskcode == "3") | 
+          "Alert: \(.name)\nURL: \(.url // "N/A")\nCWE: \(.cweid // "N/A")\nDescription: \(.desc // "N/A")\nSolution: \(.solution // "N/A")\n---"' \
+          zap-report.json | head -n 200 >> issue_body.md
+        echo '```' >> issue_body.md
+        echo "" >> issue_body.md
+        echo "---" >> issue_body.md
+        echo "### 🛠️ Remediation Steps" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "1. **Review each HIGH risk alert** in the full ZAP report" >> issue_body.md
+        echo "2. **Common OWASP ZAP findings:**" >> issue_body.md
+        echo "   - **XSS (Cross-Site Scripting):** Sanitize all user inputs" >> issue_body.md
+        echo "   - **SQL Injection:** Use parameterized queries" >> issue_body.md
+        echo "   - **CSRF:** Implement anti-CSRF tokens" >> issue_body.md
+        echo "   - **Missing Security Headers:** Add CSP, X-Frame-Options, etc." >> issue_body.md
+        echo "   - **Insecure Authentication:** Use secure session management" >> issue_body.md
+        echo "3. **Test fixes locally** before deploying to QA/Prod" >> issue_body.md
+        echo "4. **Re-run ZAP scan** after implementing fixes" >> issue_body.md
+        echo "" >> issue_body.md
+        echo "**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> issue_body.md
+        
+        # Check for existing open issue
+        EXISTING_ISSUE=$(gh issue list --state open --search "OWASP ZAP DAST Alert in:title" --json number --jq '.[0].number' || true)
+        
+        if [[ -n "$EXISTING_ISSUE" ]]; then
+          echo "⚠️ Updating existing issue #$EXISTING_ISSUE"
+          gh issue comment "$EXISTING_ISSUE" --body "🔄 **Recurrence detected** in workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        else
+          echo "🚨 Creating new security issue"
+          gh issue create \
+            --title "[HIGH] OWASP ZAP DAST Alert - $HIGH_COUNT HIGH Risk Vulnerabilities" \
+            --body-file issue_body.md \
+            --label "security,dast,zap,high-severity" \
+            --assignee "${{ github.actor }}"
+        fi
+
+    - name: Disconnect Tailscale
+      if: always()
+      shell: bash
+      run: |
+        sudo tailscale down || true
+
+    - name: Fail Workflow Gate
+      if: |
+        (inputs.fail_on_severity == 'HIGH' && steps.zap_scan.outputs.high_count > 0) ||
+        (inputs.fail_on_severity == 'MEDIUM' && (steps.zap_scan.outputs.high_count > 0 || steps.zap_scan.outputs.medium_count > 0)) ||
+        (inputs.fail_on_severity == 'LOW' && steps.zap_scan.outputs.total_count > 0)
+      shell: bash
+      run: |
+        echo "::error::OWASP ZAP detected vulnerabilities at or above ${{ inputs.fail_on_severity }} severity. Build failed."
+        exit 1

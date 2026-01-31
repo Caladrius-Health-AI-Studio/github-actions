@@ -1,0 +1,96 @@
+name: 'SBOM Generation'
+description: 'Generates Software Bill of Materials (SBOM) in CycloneDX format using Syft'
+
+inputs:
+  output_format:
+    description: 'SBOM output format (cyclonedx-json, spdx-json, syft-json)'
+    required: false
+    default: 'cyclonedx-json'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Syft
+      shell: bash
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+    - name: Generate SBOM
+      id: generate_sbom
+      shell: bash
+      run: |
+        SBOM_FILE="${{ github.workspace }}/sbom-${{ inputs.output_format }}.json"
+        
+        # Generate SBOM from current directory
+        syft scan dir:. \
+          --output ${{ inputs.output_format }}="$SBOM_FILE" \
+          --quiet
+        
+        # Count components
+        if [[ -f "$SBOM_FILE" ]]; then
+          if [[ "${{ inputs.output_format }}" == "cyclonedx-json" ]]; then
+            COMPONENT_COUNT=$(jq '.components | length' "$SBOM_FILE" 2>/dev/null || echo "0")
+          elif [[ "${{ inputs.output_format }}" == "spdx-json" ]]; then
+            COMPONENT_COUNT=$(jq '.packages | length' "$SBOM_FILE" 2>/dev/null || echo "0")
+          else
+            COMPONENT_COUNT=$(jq '.artifacts | length' "$SBOM_FILE" 2>/dev/null || echo "0")
+          fi
+          
+          echo "component_count=$COMPONENT_COUNT" >> $GITHUB_OUTPUT
+          echo "sbom_generated=true" >> $GITHUB_OUTPUT
+        else
+          echo "component_count=0" >> $GITHUB_OUTPUT
+          echo "sbom_generated=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Generate SBOM Summary
+      if: always()
+      shell: bash
+      run: |
+        SBOM_FILE="${{ github.workspace }}/sbom-${{ inputs.output_format }}.json"
+        
+        echo "## 📦 Software Bill of Materials (SBOM)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ steps.generate_sbom.outputs.sbom_generated }}" == "true" ]]; then
+          echo "✅ **SBOM Generated Successfully**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Format:** ${{ inputs.output_format }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Components Detected:** ${{ steps.generate_sbom.outputs.component_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Show top dependencies by type
+          echo "### 📊 Component Breakdown" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ inputs.output_format }}" == "cyclonedx-json" ]]; then
+            echo "| Type | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+            jq -r '.components | group_by(.type) | .[] | "\(.[0].type) | \(length)"' "$SBOM_FILE" | \
+              awk '{print "| " $0 " |"}' >> $GITHUB_STEP_SUMMARY || true
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📄 **SBOM File:** \`sbom-${{ inputs.output_format }}.json\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_SBOM archived to security-archives branch for ABDM-WASA compliance._" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ **SBOM generation failed or no components detected.**" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Create SBOM Metadata
+      if: steps.generate_sbom.outputs.sbom_generated == 'true'
+      shell: bash
+      run: |
+        cat > sbom-metadata.json << EOF
+          {
+            "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "format": "${{ inputs.output_format }}",
+            "component_count": ${{ steps.generate_sbom.outputs.component_count }},
+            "repository": "${{ github.repository }}",
+            "commit_sha": "${{ github.sha }}",
+            "branch": "${{ github.ref_name }}",
+            "workflow_run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
