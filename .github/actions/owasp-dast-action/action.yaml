@@ -19,18 +19,6 @@ inputs:
     description: 'Fail build on alerts at or above this severity (HIGH, MEDIUM, LOW)'
     required: false
     default: 'HIGH'
-  auth_username:
-    description: 'Username for authentication (optional)'
-    required: false
-    default: ''
-  auth_password:
-    description: 'Password for authentication (optional)'
-    required: false
-    default: ''
-  auth_login_url:
-    description: 'Login URL for authentication (optional)'
-    required: false
-    default: ''
 
 runs:
   using: "composite"
@@ -65,42 +53,11 @@ runs:
         tar -xzf ZAP_2.14.0_Linux.tar.gz
         sudo mv ZAP_2.14.0 /opt/zap
         sudo ln -s /opt/zap/zap.sh /usr/local/bin/zap.sh
-
-    - name: Create ZAP Authentication Script
-      if: inputs.auth_username != '' && inputs.auth_password != ''
-      shell: bash
-      run: |
-        cat > zap-auth.js << 'AUTHEOF'
-// ZAP Authentication Script
-function authenticate(helper, paramsValues, credentials) {
-    var loginUrl = paramsValues.get("loginUrl");
-    var username = credentials.getParam("username");
-    var password = credentials.getParam("password");
-    
-    var msg = helper.prepareMessage();
-    msg.setRequestHeader("POST " + loginUrl + " HTTP/1.1\r\n" +
-                         "Host: " + helper.getURI(loginUrl).getHost() + "\r\n" +
-                         "Content-Type: application/json\r\n");
-    
-    var requestBody = JSON.stringify({
-        email: username,
-        password: password
-    });
-    
-    msg.setRequestBody(requestBody);
-    helper.sendAndReceive(msg);
-    
-    return msg;
-}
-
-function getRequiredParamsNames() {
-    return ["loginUrl"];
-}
-
-function getCredentialsParamsNames() {
-    return ["username", "password"];
-}
-AUTHEOF
+        
+        echo "✅ ZAP installed successfully"
+        
+        # Note: Authentication will be configured in future update
+        # For now, ZAP will scan public pages only
 
     - name: Run ZAP Scan
       id: zap_scan
