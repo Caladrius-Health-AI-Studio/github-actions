@@ -31,7 +31,7 @@ runs:
       with:
         oauth-client-id: ${{ inputs.tailscale_oauth_client_id }}
         oauth-secret: ${{ inputs.tailscale_oauth_secret }}
-        tags: tag:ci
+        #tags: tag:ci
 
     - name: Verify Tailscale Connection
       shell: bash
