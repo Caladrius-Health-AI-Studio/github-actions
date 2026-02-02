@@ -44,81 +44,42 @@ runs:
           echo "⚠️ Warning: Cannot ping $TARGET_HOST (might still be accessible via HTTP)"
         fi
 
-    - name: Install OWASP ZAP
-      shell: bash
-      run: |
-        # Install ZAP
-        wget -q https://github.com/zaproxy/zaproxy/releases/download/v2.14.0/ZAP_2.14.0_Linux.tar.gz
-        tar -xzf ZAP_2.14.0_Linux.tar.gz
-        sudo mv ZAP_2.14.0 /opt/zap
-        sudo ln -s /opt/zap/zap.sh /usr/local/bin/zap.sh
-        
-        echo "✅ ZAP installed successfully"
-        
-        # Note: Authentication will be configured in future update
-        # For now, ZAP will scan public pages only
-
-    - name: Run ZAP Scan
+    - name: Run ZAP Baseline Scan (Docker)
       id: zap_scan
       shell: bash
       run: |
         REPORT_FILE="${{ github.workspace }}/zap-report.json"
         HTML_REPORT="${{ github.workspace }}/zap-report.html"
-        
         TARGET_URL="${{ inputs.target_url }}"
         
-        # Build ZAP command based on scan type
+        echo "🐳 Pulling ZAP Docker image..."
+        docker pull ghcr.io/zaproxy/zaproxy:stable
+        
         if [[ "${{ inputs.scan_type }}" == "full" ]]; then
           echo "🔍 Running FULL ZAP scan (this may take 15-30 minutes)..."
           
-          # Full scan using ZAP CLI
-          /opt/zap/zap.sh -cmd \
-            -quickurl "$TARGET_URL" \
-            -quickprogress \
-            -quickout "$REPORT_FILE" || true
-          
-          # Generate HTML report
-          if [[ -f "$REPORT_FILE" ]]; then
-            /opt/zap/zap.sh -cmd \
-              -jsonout "$REPORT_FILE" \
-              -htmlout "$HTML_REPORT" || true
-          fi
+          docker run --rm \
+            --network host \
+            -v $(pwd):/zap/wrk:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py \
+            -t "$TARGET_URL" \
+            -J zap-report.json \
+            -r zap-report.html \
+            -I || true
+            
         else
-          echo "🔍 Running BASELINE ZAP scan (quick check)..."
+          echo "🔍 Running BASELINE ZAP scan (quick security check)..."
           
-          # Baseline scan - simpler, faster
-          /opt/zap/zap.sh -cmd \
-            -quickurl "$TARGET_URL" \
-            -quickprogress \
-            -quickout "$REPORT_FILE" || true
-          
-          # Fallback: If quickscan fails, try basic spider + passive scan
-          if [[ ! -f "$REPORT_FILE" ]] || [[ ! -s "$REPORT_FILE" ]]; then
-            echo "Quickscan failed, trying alternative method..."
-            /opt/zap/zap.sh -daemon -port 8090 -config api.disablekey=true &
-            ZAP_PID=$!
-            sleep 10
-            
-            # Spider the target
-            curl "http://localhost:8090/JSON/spider/action/scan/?url=$TARGET_URL" || true
-            sleep 5
-            
-            # Wait for spider to complete
-            while [ $(curl -s "http://localhost:8090/JSON/spider/view/status/" | jq -r '.status') != "100" ]; do
-              sleep 2
-            done
-            
-            # Export results
-            curl "http://localhost:8090/JSON/core/view/alerts/?baseurl=$TARGET_URL" > "$REPORT_FILE" || true
-            
-            # Kill ZAP daemon
-            kill $ZAP_PID || true
-          fi
-          
-          # Generate HTML report if JSON exists
-          if [[ -f "$REPORT_FILE" ]] && [[ -s "$REPORT_FILE" ]]; then
-            echo "<html><body><h1>ZAP Scan Report</h1><pre>$(cat $REPORT_FILE)</pre></body></html>" > "$HTML_REPORT"
-          fi
+          docker run --rm \
+            --network host \
+            -v $(pwd):/zap/wrk:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t "$TARGET_URL" \
+            -J zap-report.json \
+            -r zap-report.html \
+            -I || true
         fi
         
         # Ensure reports exist (create empty if needed)
@@ -150,6 +111,9 @@ runs:
           echo "info_count=0" >> $GITHUB_OUTPUT
           echo "total_count=0" >> $GITHUB_OUTPUT
         fi
+        
+        echo "📊 Scan complete!"
+        echo "   HIGH: $HIGH_COUNT | MEDIUM: $MEDIUM_COUNT | LOW: $LOW_COUNT | INFO: $INFO_COUNT"
 
     - name: Generate Summary Report
       if: always()
