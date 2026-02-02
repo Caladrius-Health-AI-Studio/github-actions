@@ -5,11 +5,8 @@ inputs:
   github_token:
     description: 'GitHub token for creating issues'
     required: true
-  tailscale_oauth_client_id:
-    description: 'Tailscale OAuth Client ID'
-    required: true
-  tailscale_oauth_secret:
-    description: 'Tailscale OAuth Client Secret'
+  tailscale_auth_key:
+    description: 'Tailscale Auth Key (reusable, ephemeral)'
     required: true
   target_url:
     description: 'Target URL to scan (e.g., http://100.105.177.39:3000)'
@@ -29,9 +26,7 @@ runs:
     - name: Setup Tailscale
       uses: tailscale/github-action@v2
       with:
-        oauth-client-id: ${{ inputs.tailscale_oauth_client_id }}
-        oauth-secret: ${{ inputs.tailscale_oauth_secret }}
-        tags: tag:ci
+        authkey: ${{ inputs.tailscale_auth_key }}
 
     - name: Verify Tailscale Connection
       shell: bash
