@@ -81,10 +81,10 @@ runs:
           echo "| Severity | Package | Vulnerability | Installed | Fixed In |" >> $GITHUB_STEP_SUMMARY
           echo "| --- | --- | --- | --- | --- |" >> $GITHUB_STEP_SUMMARY
           
-          jq -r '.Results[]? | select(.Vulnerabilities) | .Target as $target | 
-            .Vulnerabilities[] | select(.Severity == "CRITICAL" or .Severity == "HIGH") | 
-            "| \(.Severity) | \(.PkgName) | \(.VulnerabilityID) | \(.InstalledVersion) | \(.FixedVersion // "N/A") |"' \
-            "$REPORT_FILE" | head -n 30 >> $GITHUB_STEP_SUMMARY || true
+          jq -r '[.Results[]? | select(.Vulnerabilities) | .Target as $target |
+            .Vulnerabilities[] | select(.Severity == "CRITICAL" or .Severity == "HIGH") |
+            "| \(.Severity) | \(.PkgName) | \(.VulnerabilityID) | \(.InstalledVersion) | \(.FixedVersion // "N/A") |"] | .[0:30][]' \
+            "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
           
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "_Showing top 30 CRITICAL/HIGH vulnerabilities. See full report in artifacts._" >> $GITHUB_STEP_SUMMARY
@@ -119,10 +119,10 @@ runs:
         echo "### 📦 Critical & High Severity Vulnerabilities" >> issue_body.md
         echo "" >> issue_body.md
         echo '```' >> issue_body.md
-        jq -r '.Results[]? | select(.Vulnerabilities) | .Target as $target | 
-          .Vulnerabilities[] | select(.Severity == "CRITICAL" or .Severity == "HIGH") | 
-          "\(.Severity) - \(.PkgName) (\(.InstalledVersion))\n  CVE: \(.VulnerabilityID)\n  Fixed in: \(.FixedVersion // "No fix available")\n  File: \($target)\n"' \
-          trivy-report.json | head -n 100 >> issue_body.md
+        jq -r '[.Results[]? | select(.Vulnerabilities) | .Target as $target |
+          .Vulnerabilities[] | select(.Severity == "CRITICAL" or .Severity == "HIGH") |
+          "\(.Severity) - \(.PkgName) (\(.InstalledVersion))\n  CVE: \(.VulnerabilityID)\n  Fixed in: \(.FixedVersion // "No fix available")\n  File: \($target)\n"] | .[0:50][]' \
+          trivy-report.json >> issue_body.md 2>/dev/null || true
         echo '```' >> issue_body.md
         echo "" >> issue_body.md
         echo "---" >> issue_body.md
